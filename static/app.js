@@ -43,9 +43,13 @@ function render(data) {
       <small>Evidence: ${citations || "No source reference supplied"}</small>
     </article>`;
   }).join("");
-  const sources = (data.sources || []).map((source, index) =>
-    `<div class="source">[${index + 1}] <a href="${safeSourceUrl(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a><p>${escapeHtml(source.published_date)}</p></div>`
-  ).join("");
+  const assessmentByNumber = new Map((b.source_assessments || []).map(item => [item.source_number, item]));
+  const sources = (data.sources || []).map((source, index) => {
+    const assessment = assessmentByNumber.get(index + 1);
+    const relevance = assessment ? assessment.relevance : "unassessed";
+    const reason = assessment && assessment.reason ? `<p>${escapeHtml(assessment.reason)}</p>` : "";
+    return `<div class="source"><strong>[${index + 1}] ${escapeHtml(relevance.toUpperCase())}</strong> <a href="${safeSourceUrl(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a><p>${escapeHtml(source.published_date)}</p>${reason}</div>`;
+  }).join("");
   resultsBox.innerHTML = `
     <div class="result-heading"><div><p class="eyebrow">YOUR MEETING BRIEFING</p><h2>${escapeHtml(data.company)}</h2></div><button class="print-button" type="button" onclick="window.print()">Print / Save PDF</button></div>
     <p class="muted">Meeting: ${escapeHtml(data.meeting_date)} · Evidence window: ${escapeHtml(data.window_start)} – ${escapeHtml(data.window_end)}</p>
