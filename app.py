@@ -243,13 +243,19 @@ def research():
                 old_number: new_number
                 for new_number, (old_number, _) in enumerate(kept_pairs, start=1)
             }
+            supported_developments = []
             for development in briefing.get("key_developments", []):
-                if isinstance(development, dict):
-                    development["source_numbers"] = [
-                        number_map[number]
-                        for number in development.get("source_numbers", [])
-                        if number in number_map and relevance_by_number.get(number) in ("direct", "contextual")
-                    ]
+                if not isinstance(development, dict):
+                    continue
+                development["source_numbers"] = [
+                    number_map[number]
+                    for number in development.get("source_numbers", [])
+                    if number in number_map and relevance_by_number.get(number) in ("direct", "contextual")
+                ]
+                # A factual development without a surviving citation is not shown.
+                if development["source_numbers"]:
+                    supported_developments.append(development)
+            briefing["key_developments"] = supported_developments
             briefing["source_assessments"] = [
                 {
                     **item,
