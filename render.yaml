@@ -9,9 +9,9 @@ services:
     envVars:
       - key: TAVILY_API_KEY
         sync: false
-      - key: OPENAI_API_KEY
+      - key: GROQ_API_KEY
         sync: false
-      - key: OPENAI_MODEL
-        value: gpt-4o-mini
-      - key: OPENAI_BASE_URL
-        value: https://api.openai.com/v1
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_BASE_URL
+        value: https://api.groq.com/openai/v1
