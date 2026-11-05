@@ -59,6 +59,14 @@ For a future meeting, the search window ends at the current date because future 
 
 6. Open http://127.0.0.1:5000
 
+## Deploy on Render
+
+1. Push this repository to GitHub (already done for this project).
+2. In Render, choose **New + → Blueprint** and select this repository.
+3. Render reads `render.yaml` and creates the web service.
+4. In the service environment settings, add `TAVILY_API_KEY` and `OPENAI_API_KEY` as secret values. Do not put API keys in GitHub.
+5. Wait for the deploy to finish, then open the generated `onrender.com` URL. The `/health` endpoint confirms the app is running and whether the two keys are configured.
+
 ## API
 
 - `GET /health` — app status and boolean API-configuration indicators.
