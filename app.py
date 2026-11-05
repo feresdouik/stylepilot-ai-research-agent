@@ -90,8 +90,10 @@ def build_briefing(company: str, meeting_date: date, sources: list, start_date: 
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is missing. Add it to your Render environment variables.")
-    base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
-    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    # Pin the known-supported Groq endpoint and model so stale Render
+    # environment variables cannot override the application configuration.
+    base_url = "https://api.groq.com/openai/v1"
+    model = "openai/gpt-oss-120b"
 
     source_text = "\n\n".join(
         f"[{i + 1}] {s['title']}\nURL: {s['url']}\nPublished: {s['published_date']}\n"
@@ -191,8 +193,19 @@ def research():
             briefing = build_briefing(company.strip(), meeting_date, dated_sources, start_date, end_date)
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 502
-            app.logger.warning("Groq API HTTP error (%s)", status_code)
-            return jsonify({"error": f"Groq API returned HTTP {status_code}. Check GROQ_API_KEY, model availability, and Groq account access."}), 502
+            provider_message = "No response body"
+            if exc.response is not None:
+                try:
+                    error_body = exc.response.json()
+                    provider_message = (
+                        error_body.get("error", {}).get("message")
+                        if isinstance(error_body, dict) and isinstance(error_body.get("error"), dict)
+                        else None
+                    ) or exc.response.text[:500] or provider_message
+                except ValueError:
+                    provider_message = exc.response.text[:500] or provider_message
+            app.logger.warning("Groq API HTTP error (%s): %s", status_code, provider_message)
+            return jsonify({"error": f"Groq API returned HTTP {status_code}: {provider_message}"}), 502
         return jsonify({
             "company": company.strip(),
             "meeting_date": meeting_date.isoformat(),
