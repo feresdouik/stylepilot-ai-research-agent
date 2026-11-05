@@ -227,6 +227,38 @@ def research():
 
         try:
             briefing = build_briefing(company.strip(), meeting_date, dated_sources, start_date, end_date)
+            # Remove sources the model explicitly judged irrelevant, then remap
+            # citations so the displayed source numbers stay aligned.
+            assessments = briefing.get("source_assessments", [])
+            relevance_by_number = {
+                item.get("source_number"): item.get("relevance")
+                for item in assessments if isinstance(item, dict)
+            }
+            kept_pairs = [
+                (old_number, source)
+                for old_number, source in enumerate(dated_sources, start=1)
+                if relevance_by_number.get(old_number) != "irrelevant"
+            ]
+            number_map = {
+                old_number: new_number
+                for new_number, (old_number, _) in enumerate(kept_pairs, start=1)
+            }
+            for development in briefing.get("key_developments", []):
+                if isinstance(development, dict):
+                    development["source_numbers"] = [
+                        number_map[number]
+                        for number in development.get("source_numbers", [])
+                        if number in number_map
+                    ]
+            briefing["source_assessments"] = [
+                {
+                    **item,
+                    "source_number": number_map[item["source_number"]],
+                }
+                for item in assessments
+                if isinstance(item, dict) and item.get("source_number") in number_map
+            ]
+            dated_sources = [source for _, source in kept_pairs]
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 502
             provider_message = "No response body"
