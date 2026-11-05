@@ -91,7 +91,7 @@ def build_briefing(company: str, meeting_date: date, sources: list, start_date: 
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is missing. Add it to your Render environment variables.")
     base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
-    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
     source_text = "\n\n".join(
         f"[{i + 1}] {s['title']}\nURL: {s['url']}\nPublished: {s['published_date']}\n"
