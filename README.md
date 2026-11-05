@@ -2,59 +2,89 @@
 
 **Research before you walk in.**
 
-StylePilot AI is an AI-powered meeting research agent. Enter a company or person's name and a meeting date to generate a concise, source-backed briefing based on developments from the preceding 30 days.
+StylePilot AI is an AI-powered meeting research agent. Enter a company or person's name and a meeting date to create a concise briefing from relevant developments in the 30 days before the meeting.
 
-## What it does
+## MVP workflow
 
-- Searches recent web/news coverage with the Tavily Search API.
-- Uses an LLM to organize the supplied evidence into a meeting briefing.
-- Highlights key developments, why they matter, discussion points, open questions, opportunities, risks, and research gaps.
-- Displays source links so users can inspect the underlying material.
+1. The user enters a company/person and meeting date.
+2. Tavily News Search retrieves sources using an explicit date range.
+3. The backend parses publication dates and only sends dated sources inside the window to the AI analysis step.
+4. An OpenAI-compatible LLM organizes supported evidence into a meeting briefing.
+5. The interface displays findings, discussion prompts, risks, research gaps, and clickable source links.
 
-The initial demo is designed for business meeting preparation across industries. Fashion and retail can be used as an example research domain, not as a product limitation.
+For a future meeting, the search window ends at the current date because future news cannot be retrieved yet. Undated results are disclosed and excluded from AI analysis.
+
+## Features
+
+- Evidence-first meeting preparation for companies and people across industries.
+- 30-day date window anchored to the meeting date.
+- Dated-source filtering before AI synthesis.
+- Key developments with source-number references.
+- Discussion points, open questions, opportunities, risks, and research gaps.
+- Print / Save as PDF from the browser.
+- Basic health endpoint showing whether API keys are configured (never exposes the keys).
 
 ## Tech stack
 
-- Python and Flask
+- Python 3.10+
+- Flask
 - Tavily Search API
 - OpenAI-compatible Chat Completions API
-- HTML, CSS, and vanilla JavaScript
+- HTML, CSS, vanilla JavaScript
 
 ## Run locally
 
-1. Use Python 3.10 or newer.
-2. Clone this repository and open its directory.
-3. Create and activate a virtual environment.
-4. Install dependencies:
+1. Clone the repository.
+2. Create and activate a Python virtual environment.
+3. Install dependencies:
 
    ```bash
    pip install -r requirements.txt
    ```
 
-5. Copy `.env.example` to `.env` and add your API keys:
+4. Copy `.env.example` to `.env` and add your keys:
 
    ```env
-   TAVILY_API_KEY=...
-   OPENAI_API_KEY=...
+   TAVILY_API_KEY=your_tavily_api_key
+   OPENAI_API_KEY=your_llm_api_key
    OPENAI_MODEL=gpt-4o-mini
    OPENAI_BASE_URL=https://api.openai.com/v1
    ```
 
-6. Start the app:
+5. Start the app:
 
    ```bash
    python app.py
    ```
 
-7. Open http://127.0.0.1:5000
+6. Open http://127.0.0.1:5000
 
 ## API
 
-- `GET /health` — health check.
-- `POST /api/research` — accepts JSON with `company` and `meeting_date` (`YYYY-MM-DD`).
+- `GET /health` — app status and boolean API-configuration indicators.
+- `POST /api/research` — JSON body: `{"company":"Example Ltd","meeting_date":"2026-11-20"}`.
+
+## Environment variables
+
+| Variable | Required | Purpose |
+|---|---|---|
+| `TAVILY_API_KEY` | Yes | Tavily Search API authentication |
+| `OPENAI_API_KEY` | Yes | LLM provider authentication |
+| `OPENAI_MODEL` | No | Model name; defaults to `gpt-4o-mini` |
+| `OPENAI_BASE_URL` | No | OpenAI-compatible API base URL |
+| `PORT` | No | Local server port; defaults to `5000` |
+| `FLASK_DEBUG` | No | Enable Flask debug mode only for local development |
+
+## Tests
+
+Run:
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 ## Important limitations
 
-This is an early hackathon MVP. Search results and AI summaries can be incomplete or inaccurate. Publication dates may be missing, and the app explicitly labels missing dates rather than treating them as verified. Always open the source links and independently verify important claims before relying on them in a meeting.
+This is a hackathon MVP, not a verified intelligence service. Search coverage may be incomplete, publishers may omit dates, and AI summaries can make mistakes. The app filters sources by their parsed publication dates, but this does not independently verify the truth of an article. Always open the source links and independently verify important claims.
 
 Never commit your `.env` file or API keys.
