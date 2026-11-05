@@ -9,7 +9,7 @@ StylePilot AI is an AI-powered meeting research agent. Enter a company or person
 1. The user enters a company/person and meeting date.
 2. Tavily News Search retrieves sources using an explicit date range.
 3. The backend parses publication dates and only sends dated sources inside the window to the AI analysis step.
-4. An OpenAI-compatible LLM organizes supported evidence into a meeting briefing.
+4. Groq's Groq API (OpenAI-compatible Chat Completions) organizes supported evidence into a meeting briefing.
 5. The interface displays findings, discussion prompts, risks, research gaps, and clickable source links.
 
 For a future meeting, the search window ends at the current date because future news cannot be retrieved yet. Undated results are disclosed and excluded from AI analysis.
@@ -46,9 +46,9 @@ For a future meeting, the search window ends at the current date because future 
 
    ```env
    TAVILY_API_KEY=your_tavily_api_key
-   OPENAI_API_KEY=your_llm_api_key
-   OPENAI_MODEL=gpt-4o-mini
-   OPENAI_BASE_URL=https://api.openai.com/v1
+   GROQ_API_KEY=your_groq_api_key
+   GROQ_MODEL=llama-3.3-70b-versatile
+   GROQ_BASE_URL=https://api.groq.com/openai/v1
    ```
 
 5. Start the app:
@@ -64,7 +64,7 @@ For a future meeting, the search window ends at the current date because future 
 1. Push this repository to GitHub (already done for this project).
 2. In Render, choose **New + → Blueprint** and select this repository.
 3. Render reads `render.yaml` and creates the web service.
-4. In the service environment settings, add `TAVILY_API_KEY` and `OPENAI_API_KEY` as secret values. Do not put API keys in GitHub.
+4. In the service environment settings, add `TAVILY_API_KEY` and `GROQ_API_KEY` as secret values. Do not put API keys in GitHub.
 5. Wait for the deploy to finish, then open the generated `onrender.com` URL. The `/health` endpoint confirms the app is running and whether the two keys are configured.
 
 ## API
@@ -77,9 +77,9 @@ For a future meeting, the search window ends at the current date because future 
 | Variable | Required | Purpose |
 |---|---|---|
 | `TAVILY_API_KEY` | Yes | Tavily Search API authentication |
-| `OPENAI_API_KEY` | Yes | LLM provider authentication |
-| `OPENAI_MODEL` | No | Model name; defaults to `gpt-4o-mini` |
-| `OPENAI_BASE_URL` | No | OpenAI-compatible API base URL |
+| `GROQ_API_KEY` | Yes | Groq LLM provider authentication |
+| `GROQ_MODEL` | No | Model name; defaults to `llama-3.3-70b-versatile` |
+| `GROQ_BASE_URL` | No | Groq OpenAI-compatible API base URL |
 | `PORT` | No | Local server port; defaults to `5000` |
 | `FLASK_DEBUG` | No | Enable Flask debug mode only for local development |
 
