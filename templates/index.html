@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>StylePilot AI — Meeting Intelligence</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <nav class="nav"><a class="brand" href="/">✦ StylePilot <span>AI</span></a><span class="nav-note">MEETING INTELLIGENCE</span></nav>
+    <section class="hero">
+      <p class="eyebrow">RESEARCH BEFORE YOU WALK IN</p>
+      <h1>Walk into every meeting<br><em>one step ahead.</em></h1>
+      <p class="sub">A focused, source-backed briefing on the company or person you’re about to meet — built from recent developments.</p>
+    </section>
+    <section class="panel">
+      <form id="research-form">
+        <label for="company">WHO ARE YOU MEETING?</label>
+        <input id="company" name="company" placeholder="Company or person's name" required minlength="2">
+        <label for="meeting-date">WHEN IS THE MEETING?</label>
+        <input id="meeting-date" name="meeting-date" type="date" required>
+        <button id="submit" type="submit">Prepare my briefing <span>→</span></button>
+      </form>
+      <p class="privacy">Research window: the 30 days before your meeting date.</p>
+    </section>
+    <div id="status" role="status"></div>
+    <section id="results" class="results" hidden></section>
+    <footer>STYLEPILOT AI <span>Evidence first. Better conversations.</span></footer>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
