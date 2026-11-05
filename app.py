@@ -151,7 +151,7 @@ def health():
         "status": "ok",
         "app": "StylePilot AI",
         "tavily_configured": bool(os.getenv("TAVILY_API_KEY")),
-        "llm_configured": bool(os.getenv("OPENAI_API_KEY")),
+        "llm_configured": bool(os.getenv("GROQ_API_KEY")),
     })
 
 
