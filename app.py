@@ -45,7 +45,7 @@ def search_web(company: str, meeting_date: date):
     payload = {
         "query": (
             f'"{company}" recent news company updates announcements '
-            "product launches partnerships leadership hiring'
+            "product launches partnerships leadership hiring"
         ),
         "topic": "news",
         "search_depth": "advanced",
