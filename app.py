@@ -172,7 +172,13 @@ def research():
         return jsonify({"error": "Meeting date cannot be in the past."}), 400
 
     try:
-        dated_sources, undated_sources, start_date, end_date = search_web(company.strip(), meeting_date)
+        try:
+            dated_sources, undated_sources, start_date, end_date = search_web(company.strip(), meeting_date)
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 502
+            app.logger.warning("Tavily API HTTP error (%s)", status_code)
+            return jsonify({"error": f"Tavily API returned HTTP {status_code}. Check TAVILY_API_KEY and Tavily account access."}), 502
+
         if not dated_sources:
             return jsonify({
                 "error": "No sources with publication dates inside this research window were found. Try a more specific name.",
@@ -180,7 +186,13 @@ def research():
                 "window_start": start_date.isoformat(),
                 "window_end": end_date.isoformat(),
             }), 404
-        briefing = build_briefing(company.strip(), meeting_date, dated_sources, start_date, end_date)
+
+        try:
+            briefing = build_briefing(company.strip(), meeting_date, dated_sources, start_date, end_date)
+        except requests.HTTPError as exc:
+            status_code = exc.response.status_code if exc.response is not None else 502
+            app.logger.warning("Groq API HTTP error (%s)", status_code)
+            return jsonify({"error": f"Groq API returned HTTP {status_code}. Check GROQ_API_KEY, model availability, and Groq account access."}), 502
         return jsonify({
             "company": company.strip(),
             "meeting_date": meeting_date.isoformat(),
