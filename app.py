@@ -87,11 +87,11 @@ def search_web(company: str, meeting_date: date):
 
 
 def build_briefing(company: str, meeting_date: date, sources: list, start_date: date, end_date: date):
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is missing. Add it to your .env file.")
-    base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        raise RuntimeError("GROQ_API_KEY is missing. Add it to your Render environment variables.")
+    base_url = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1").rstrip("/")
+    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
     source_text = "\n\n".join(
         f"[{i + 1}] {s['title']}\nURL: {s['url']}\nPublished: {s['published_date']}\n"
