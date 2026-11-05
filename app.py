@@ -114,7 +114,10 @@ discussion_points (string array),
 open_questions (string array),
 opportunities (string array),
 risks (string array),
-research_gaps (string array).
+research_gaps (string array),
+source_assessments (array with one object for EVERY supplied source: source_number integer, relevance one of "direct", "contextual", "irrelevant", reason string). Assess whether each article is genuinely about the exact company/person requested, not merely a name match. For a company named Zara, an article about singer Zara Larsson is irrelevant. Mark sources about a founder's personal activity as contextual only when there is a clear, explained connection to the company; otherwise irrelevant.
+Do not use irrelevant sources to support key_developments, the executive_summary, or recommendations. Do not infer sales impact, strategy, financial effects, or causation unless the source explicitly supports it. Label analysis as analysis, not reported fact. Avoid presenting speculative opportunities or risks as established developments.
+For each key development, cite only source numbers that directly support that specific claim. If no source supports a claim, omit it. Never reuse a source number for a different article.
 
 DATED SOURCES:
 {source_text}"""
@@ -139,6 +142,39 @@ DATED SOURCES:
     briefing = json.loads(content)
     if not isinstance(briefing, dict):
         raise ValueError("The AI returned an invalid briefing format.")
+
+    # Validate AI-generated source references against the actual source list.
+    valid_numbers = set(range(1, len(sources) + 1))
+    assessments = briefing.get("source_assessments", [])
+    if not isinstance(assessments, list):
+        assessments = []
+    clean_assessments = []
+    seen = set()
+    for item in assessments:
+        if not isinstance(item, dict):
+            continue
+        number = item.get("source_number")
+        if isinstance(number, int) and number in valid_numbers and number not in seen:
+            relevance = item.get("relevance")
+            if relevance not in ("direct", "contextual", "irrelevant"):
+                relevance = "contextual"
+            clean_assessments.append({
+                "source_number": number,
+                "relevance": relevance,
+                "reason": str(item.get("reason") or "")[:300],
+            })
+            seen.add(number)
+    briefing["source_assessments"] = clean_assessments
+
+    developments = briefing.get("key_developments", [])
+    if isinstance(developments, list):
+        for item in developments:
+            if isinstance(item, dict):
+                refs = item.get("source_numbers", [])
+                item["source_numbers"] = [
+                    n for n in refs
+                    if isinstance(n, int) and n in valid_numbers
+                ] if isinstance(refs, list) else []
     return briefing
 
 
