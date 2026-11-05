@@ -237,7 +237,7 @@ def research():
             kept_pairs = [
                 (old_number, source)
                 for old_number, source in enumerate(dated_sources, start=1)
-                if relevance_by_number.get(old_number) != "irrelevant"
+                if relevance_by_number.get(old_number, "irrelevant") != "irrelevant"
             ]
             number_map = {
                 old_number: new_number
@@ -248,7 +248,7 @@ def research():
                     development["source_numbers"] = [
                         number_map[number]
                         for number in development.get("source_numbers", [])
-                        if number in number_map
+                        if number in number_map and relevance_by_number.get(number) in ("direct", "contextual")
                     ]
             briefing["source_assessments"] = [
                 {
@@ -256,7 +256,7 @@ def research():
                     "source_number": number_map[item["source_number"]],
                 }
                 for item in assessments
-                if isinstance(item, dict) and item.get("source_number") in number_map
+                if isinstance(item, dict) and item.get("source_number") in number_map and item.get("relevance") in ("direct", "contextual")
             ]
             dated_sources = [source for _, source in kept_pairs]
         except requests.HTTPError as exc:
