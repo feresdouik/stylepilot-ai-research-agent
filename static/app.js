@@ -47,8 +47,14 @@ function render(data) {
   const sources = (data.sources || []).map((source, index) => {
     const assessment = assessmentByNumber.get(index + 1);
     const relevance = assessment ? assessment.relevance : "unassessed";
+    const typeLabels = {
+      official_primary: "OFFICIAL / PRIMARY",
+      reputable_reporting: "NEWS / TRADE REPORTING",
+      secondary_or_unverified: "SECONDARY / VERIFY"
+    };
+    const sourceType = typeLabels[source.source_type] || "SOURCE TYPE UNKNOWN";
     const reason = assessment && assessment.reason ? `<p>${escapeHtml(assessment.reason)}</p>` : "";
-    return `<div class="source"><strong>[${index + 1}] ${escapeHtml(relevance.toUpperCase())}</strong> <a href="${safeSourceUrl(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a><p>${escapeHtml(source.published_date)}</p>${reason}</div>`;
+    return `<div class="source"><strong>[${index + 1}] ${escapeHtml(relevance.toUpperCase())} · ${escapeHtml(sourceType)}</strong> <a href="${safeSourceUrl(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a><p>${escapeHtml(source.published_date)}</p>${reason}</div>`;
   }).join("");
   resultsBox.innerHTML = `
     <div class="result-heading"><div><p class="eyebrow">YOUR MEETING BRIEFING</p><h2>${escapeHtml(data.company)}</h2></div><button class="print-button" type="button" onclick="window.print()">Print / Save PDF</button></div>
@@ -57,8 +63,8 @@ function render(data) {
     <h3>Key developments</h3>${developments || "<p>No developments extracted.</p>"}
     <h3>Discussion points</h3>${renderList(b.discussion_points)}
     <h3>Open questions</h3>${renderList(b.open_questions)}
-    <h3>Opportunities</h3>${renderList(b.opportunities)}
-    <h3>Risks</h3>${renderList(b.risks)}
+    <h3>Opportunities to explore · hypotheses</h3>${renderList(b.opportunities)}
+    <h3>Risks to examine · hypotheses</h3>${renderList(b.risks)}
     <h3>Research gaps</h3>${renderList(b.research_gaps)}
     <h3>Sources (${(data.sources || []).length} dated)</h3>${sources}
     <p class="notice">AI-generated research can be incomplete. Open the sources and verify important claims independently before relying on this briefing.</p>
