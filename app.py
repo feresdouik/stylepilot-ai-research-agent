@@ -42,38 +42,60 @@ def search_web(company: str, meeting_date: date):
     # Search engines cannot return future information. For future meetings, search
     # from the 30-day window start through today and disclose the actual cutoff.
     search_end_date = min(meeting_date, date.today())
-    payload = {
-        "query": (
-            f'"{company}" recent news company updates announcements '
-            "product launches partnerships leadership hiring"
-        ),
+    base_payload = {
         "topic": "news",
         "search_depth": "advanced",
-        "max_results": 10,
+        "max_results": 8,
         "include_answer": False,
         "include_raw_content": False,
         "start_date": start_date.isoformat(),
         "end_date": (search_end_date + timedelta(days=1)).isoformat(),
     }
-    response = requests.post(
-        TAVILY_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
+    queries = [
+        f'"{company}" recent news company updates announcements product launches partnerships leadership',
+        f'"{company}" official results annual report investor relations financial results',
+    ]
+    results = []
+    seen_urls = set()
+    for query in queries:
+        response = requests.post(
+            TAVILY_URL,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={**base_payload, "query": query},
+            timeout=REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        for item in response.json().get("results", []):
+            url = item.get("url") or ""
+            parsed = urlparse(url)
+            canonical = (parsed.netloc.lower().removeprefix("www."), parsed.path.rstrip("/").lower())
+            if canonical not in seen_urls:
+                seen_urls.add(canonical)
+                results.append(item)
 
     dated_sources, undated_sources = [], []
-    for item in data.get("results", []):
+    for item in results:
         published_raw = item.get("published_date") or item.get("date")
         published = parse_published_date(published_raw)
+        source_url = item.get("url") or ""
+        source_host = urlparse(source_url).netloc.lower().removeprefix("www.")
+        if source_host == "inditex.com" or source_host.endswith(".inditex.com"):
+            source_type = "official_primary"
+        elif source_host in {
+            "reuters.com", "bloomberg.com", "ft.com", "wsj.com", "apnews.com",
+            "bbc.com", "bbc.co.uk", "cnbc.com", "wwd.com", "fashionunited.com",
+            "fashionunited.uk", "businessoffashion.com", "motorsport.com",
+        }:
+            source_type = "reputable_reporting"
+        else:
+            source_type = "secondary_or_unverified"
         source = {
             "title": item.get("title") or "Untitled source",
-            "url": item.get("url") or "",
+            "url": source_url,
             "content": item.get("content") or "",
             "published_date": published.isoformat() if published else "Date not provided",
             "score": item.get("score"),
+            "source_type": source_type,
         }
         parsed_url = urlparse(source["url"])
         if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
@@ -116,8 +138,15 @@ opportunities (string array),
 risks (string array),
 research_gaps (string array),
 source_assessments (array with one object for EVERY supplied source: source_number integer, relevance one of "direct", "contextual", "irrelevant", reason string). Assess whether each article is genuinely about the exact company/person requested, not merely a name match. For a company named Zara, an article about singer Zara Larsson is irrelevant. Mark sources about a founder's personal activity as contextual only when there is a clear, explained connection to the company; otherwise irrelevant.
-Do not use irrelevant sources to support key_developments, the executive_summary, or recommendations. Do not infer sales impact, strategy, financial effects, or causation unless the source explicitly supports it. Label analysis as analysis, not reported fact. Avoid presenting speculative opportunities or risks as established developments.
-For each key development, cite only source numbers that directly support that specific claim. If no source supports a claim, omit it. Never reuse a source number for a different article.
+Evidence rules:
+- Prefer official company filings, investor-relations releases and annual reports for financial figures, revenue shares, strategy and guidance. A source pre-labelled official_primary is the strongest evidence.
+- Do NOT state an exact financial figure as an established fact unless an official_primary source supports that exact figure. If none is supplied, omit the number and add it to research_gaps. Secondary sites can be leads, not definitive proof.
+- A reputable news/trade publication can support a specific reported event when the extract states that event. A headline alone is not enough.
+- Never use a source about general industry context to prove a company-specific statistic.
+- Multiple articles about the same event are corroboration, not separate developments. Prefer the strongest source and avoid padding the briefing with duplicate coverage.
+- For every development, cite only source numbers whose supplied extracts explicitly support its core claim. Never attach an unrelated source merely because it mentions the same company.
+Do not use irrelevant sources to support key_developments or the executive_summary. Do not infer sales impact, strategy, financial effects, or causation unless the source explicitly supports it. Label each "why_it_matters" as analysis. Opportunities and risks must be clearly framed as hypotheses to explore, not reported facts.
+If no source supports a claim, omit it. Never reuse a source number for a different article.
 
 DATED SOURCES:
 {source_text}"""
@@ -161,6 +190,7 @@ DATED SOURCES:
             clean_assessments.append({
                 "source_number": number,
                 "relevance": relevance,
+                "source_type": sources[number - 1].get("source_type", "secondary_or_unverified"),
                 "reason": str(item.get("reason") or "")[:300],
             })
             seen.add(number)
