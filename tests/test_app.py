@@ -61,6 +61,43 @@ class StylePilotTests(unittest.TestCase):
         self.assertEqual(result["briefing"]["key_developments"], [])
         self.assertIn("No sufficiently assessed sources", result["briefing"]["executive_summary"])
 
+    def test_financial_claims_without_official_source_are_removed(self):
+        meeting = date.today() + timedelta(days=2)
+        sources = [{
+            "title": "News report about sales",
+            "url": "https://news.example.com/story",
+            "content": "Sales fell by 12%.",
+            "published_date": date.today().isoformat(),
+            "score": 0.9,
+            "source_type": "reputable_reporting",
+        }]
+        briefing = {
+            "executive_summary": "Revenue fell 12% and profit declined.",
+            "executive_summary_source_numbers": [1],
+            "key_developments": [{
+                "title": "Revenue fell 12%",
+                "detail": "The company's revenue fell 12%.",
+                "why_it_matters": "Analysis.",
+                "source_numbers": [1],
+            }],
+            "discussion_points": [], "open_questions": [], "opportunities": [],
+            "risks": [], "research_gaps": [],
+            "source_assessments": [{
+                "source_number": 1, "relevance": "direct",
+                "reason": "The article reports the result."
+            }]
+        }
+        with patch.object(stylepilot, "search_web", return_value=(sources, [], meeting - timedelta(days=30), date.today())):
+            with patch.object(stylepilot, "build_briefing", return_value=briefing):
+                response = self.client.post("/api/research", json={
+                    "company": "Example Ltd", "meeting_date": meeting.isoformat()
+                })
+        result = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("does not include an official primary source", result["briefing"]["executive_summary"])
+        self.assertEqual(result["briefing"]["key_developments"], [])
+        self.assertTrue(any("Official primary evidence is missing" in gap for gap in result["briefing"]["research_gaps"]))
+
     def test_valid_request_returns_briefing(self):
         meeting = date.today() + timedelta(days=2)
         sources = [{
