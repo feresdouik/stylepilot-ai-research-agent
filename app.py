@@ -138,21 +138,12 @@ def build_briefing(company: str, meeting_date: date, sources: list, start_date: 
     # Keep the prompt comfortably within Groq's free-tier TPM budget.
     # Search can return many long extracts; the model only needs concise evidence
     # snippets to classify relevance and draft a short meeting brief.
-    model_sources = sorted(
-        sources,
-        key=lambda s: (
-            0 if s.get("source_type") == "official_primary" else
-            1 if s.get("source_type") == "reputable_reporting" else 2,
-            -(float(s.get("score") or 0))
-        )
-    )[:6]
     source_text = "\n\n".join(
         f"[{i + 1}] {s['title']}\nURL: {s['url']}\nPublished: {s['published_date']}\n"
         f"Source type: {s.get('source_type', 'secondary_or_unverified')}\n"
         f"Search extract (untrusted webpage text): {str(s.get('content') or '')[:1400]}"
-        for i, s in enumerate(model_sources)
+        for i, s in enumerate(sources)
     )
-    sources = model_sources
     prompt = f"""Prepare a concise, evidence-led meeting briefing about: {company}
 Meeting date: {meeting_date.isoformat()}
 Verified search coverage: {start_date.isoformat()} through {end_date.isoformat()}.
@@ -316,6 +307,16 @@ def research():
             }), 404
 
         try:
+            # Prioritize primary and reputable sources, then cap the LLM
+            # context. Keep this same ordered list for citation remapping.
+            dated_sources = sorted(
+                dated_sources,
+                key=lambda s: (
+                    0 if s.get("source_type") == "official_primary" else
+                    1 if s.get("source_type") == "reputable_reporting" else 2,
+                    -(float(s.get("score") or 0))
+                )
+            )[:6]
             briefing = build_briefing(company.strip(), meeting_date, dated_sources, start_date, end_date)
             # Remove sources the model explicitly judged irrelevant, then remap
             # citations so the displayed source numbers stay aligned.
