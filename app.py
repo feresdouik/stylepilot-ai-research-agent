@@ -108,6 +108,23 @@ def search_web(company: str, meeting_date: date):
     return dated_sources, undated_sources, start_date, search_end_date
 
 
+def requires_official_evidence(text):
+    """Detect claims that must be backed by an official primary source."""
+    import re
+    value = str(text or "").lower()
+    financial_terms = (
+        "revenue", "profit", "sales", "turnover", "financial results",
+        "market share", "accounts for", "accounting for", "group sales",
+    )
+    numeric_financial = re.search(
+        r"(?:\\b\\d+(?:[.,]\\d+)?\\s?%|"
+        r"(?:€|\\$|£|rs\\.?\\s?)\\s?\\d|"
+        r"\\b\\d[\\d,]*(?:\\.\\d+)?\\s?(?:crore|million|billion|bn|m)\\b)",
+        value,
+    )
+    return numeric_financial is not None or any(term in value for term in financial_terms)
+
+
 def build_briefing(company: str, meeting_date: date, sources: list, start_date: date, end_date: date):
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
@@ -138,12 +155,15 @@ open_questions (string array),
 opportunities (string array),
 risks (string array),
 research_gaps (string array),
-source_assessments (array with one object for EVERY supplied source: source_number integer, relevance one of "direct", "contextual", "irrelevant", reason string). Assess whether each article is genuinely about the exact company/person requested, not merely a name match. For a company named Zara, an article about singer Zara Larsson is irrelevant. Mark sources about a founder's personal activity as contextual only when there is a clear, explained connection to the company; otherwise irrelevant.
+source_assessments (array with one object for EVERY supplied source: source_number integer, relevance one of "direct", "contextual", "irrelevant", reason string). Assess whether each article is genuinely about the exact company/person requested, not merely a name match. For a company named Zara, an article about singer Zara Larsson is irrelevant. Mark evergreen strategy essays, generic explainers, career pages and articles that merely describe long-standing company culture as irrelevant unless they report a specific event inside the evidence window. Mark sources about a founder's personal activity as contextual only when there is a clear, explained connection to the company; otherwise irrelevant.
 Evidence rules:
 - Prefer official company filings, investor-relations releases and annual reports for financial figures, revenue shares, strategy and guidance. A source pre-labelled official_primary is the strongest evidence.
 - Do NOT state an exact financial figure as an established fact unless an official_primary source supports that exact figure. If none is supplied, omit the number and add it to research_gaps. Secondary sites can be leads, not definitive proof.
 - A reputable news/trade publication can support a specific reported event when the extract states that event. A headline alone is not enough.
 - Never use a source about general industry context to prove a company-specific statistic.
+- A financial or performance claim about a subsidiary, franchise, joint venture, local operator or partner must name that entity and must not be presented as the parent company's own result. Mark it contextual unless the source establishes direct ownership and reporting scope.
+- A founder's personal property purchase is not evidence of the company's capital allocation, balance sheet, financing plans or retail strategy. Do not suggest those connections without explicit evidence.
+- Do not treat a dated publication timestamp as proof that an evergreen article describes a new development.
 - Multiple articles about the same event are corroboration, not separate developments. Prefer the strongest source and avoid padding the briefing with duplicate coverage.
 - For every development, cite only source numbers whose supplied extracts explicitly support its core claim. Never attach an unrelated source merely because it mentions the same company.
 Do not use irrelevant sources to support key_developments or the executive_summary. Do not infer sales impact, strategy, financial effects, or causation unless the source explicitly supports it. Label each "why_it_matters" as analysis. Opportunities and risks must be clearly framed as hypotheses to explore, not reported facts.
@@ -310,6 +330,44 @@ def research():
                 if isinstance(item, dict) and item.get("source_number") in number_map and item.get("relevance") in ("direct", "contextual")
             ]
             dated_sources = [source for _, source in kept_pairs]
+
+            # Enforce the primary-source rule in application code, not only in
+            # the model prompt: numerical financial/performance claims require
+            # at least one cited official source.
+            official_numbers = {
+                index for index, source in enumerate(dated_sources, start=1)
+                if source.get("source_type") == "official_primary"
+            }
+            summary_text = briefing.get("executive_summary", "")
+            summary_refs = briefing.get("executive_summary_source_numbers", [])
+            if requires_official_evidence(summary_text) and not (
+                set(summary_refs) & official_numbers
+            ):
+                briefing["executive_summary"] = (
+                    "Recent reporting identifies several topics for discussion, but "
+                    "the supplied evidence does not include an official primary source "
+                    "for the financial or performance claims. Treat those figures as "
+                    "unverified and review the research gaps before the meeting."
+                )
+                briefing["executive_summary_source_numbers"] = []
+
+            financially_supported = []
+            for development in briefing.get("key_developments", []):
+                claim_text = " ".join([
+                    str(development.get("title", "")),
+                    str(development.get("detail", "")),
+                ])
+                refs = development.get("source_numbers", [])
+                if requires_official_evidence(claim_text) and not (
+                    set(refs) & official_numbers
+                ):
+                    briefing.setdefault("research_gaps", []).append(
+                        "Official primary evidence is missing for: "
+                        + str(development.get("title", "a financial/performance claim"))
+                    )
+                    continue
+                financially_supported.append(development)
+            briefing["key_developments"] = financially_supported
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 502
             provider_message = "No response body"
