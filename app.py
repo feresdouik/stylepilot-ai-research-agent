@@ -131,6 +131,7 @@ Clearly distinguish reported facts from analysis. Cite factual claims using sour
 If evidence is weak or absent, say so. If a point cannot be supported, omit it.
 Return valid JSON with exactly these keys:
 executive_summary (string),
+executive_summary_source_numbers (integer array: cite only sources that support the summary as a whole),
 key_developments (array of objects: title, detail, why_it_matters, source_numbers as integer array),
 discussion_points (string array),
 open_questions (string array),
@@ -273,6 +274,20 @@ def research():
                 old_number: new_number
                 for new_number, (old_number, _) in enumerate(kept_pairs, start=1)
             }
+            summary_refs = briefing.get("executive_summary_source_numbers", [])
+            if not isinstance(summary_refs, list):
+                summary_refs = []
+            briefing["executive_summary_source_numbers"] = [
+                number_map[number]
+                for number in summary_refs
+                if isinstance(number, int) and number in number_map
+                and relevance_by_number.get(number) in ("direct", "contextual")
+            ]
+            if not briefing["executive_summary_source_numbers"]:
+                briefing["executive_summary"] = (
+                    "No sufficiently assessed sources support a reliable executive summary. "
+                    "Review the source list and research gaps before the meeting."
+                )
             supported_developments = []
             for development in briefing.get("key_developments", []):
                 if not isinstance(development, dict):
