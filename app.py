@@ -117,9 +117,9 @@ def requires_official_evidence(text):
         "market share", "accounts for", "accounting for", "group sales",
     )
     numeric_financial = re.search(
-        r"(?:\\b\\d+(?:[.,]\\d+)?\\s?%|"
-        r"(?:€|\\$|£|rs\\.?\\s?)\\s?\\d|"
-        r"\\b\\d[\\d,]*(?:\\.\\d+)?\\s?(?:crore|million|billion|bn|m)\\b)",
+        r"(?:\b\d+(?:[.,]\d+)?\s?%|"
+        r"(?:€|\$|£|rs\.?\s?)\s?\d|"
+        r"\b\d[\d,]*(?:\.\d+)?\s?(?:crore|million|billion|bn|m)\b)",
         value,
     )
     return numeric_financial is not None or any(term in value for term in financial_terms)
