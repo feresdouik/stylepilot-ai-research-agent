@@ -59,6 +59,7 @@ class StylePilotTests(unittest.TestCase):
         result = response.get_json()
         self.assertEqual(result["sources"], [])
         self.assertEqual(result["briefing"]["key_developments"], [])
+        self.assertIn("No sufficiently assessed sources", result["briefing"]["executive_summary"])
 
     def test_valid_request_returns_briefing(self):
         meeting = date.today() + timedelta(days=2)
@@ -71,6 +72,7 @@ class StylePilotTests(unittest.TestCase):
         }]
         briefing = {
             "executive_summary": "Example announced a product.",
+            "executive_summary_source_numbers": [1],
             "key_developments": [{
                 "title": "Product launch", "detail": "A product was announced.",
                 "why_it_matters": "Potential market impact.", "source_numbers": [1]
