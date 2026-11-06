@@ -33,6 +33,33 @@ class StylePilotTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 400)
 
+
+    def test_unassessed_sources_are_excluded_from_evidence(self):
+        meeting = date.today() + timedelta(days=2)
+        sources = [{
+            "title": "Unassessed article", "url": "https://example.com/news",
+            "content": "Unverified claim.", "published_date": date.today().isoformat(),
+            "score": 0.8, "source_type": "secondary_or_unverified",
+        }]
+        briefing = {
+            "executive_summary": "Unsupported summary.",
+            "key_developments": [{
+                "title": "Unsupported claim", "detail": "No assessed source.",
+                "why_it_matters": "Unknown.", "source_numbers": [1]
+            }],
+            "discussion_points": [], "open_questions": [], "opportunities": [],
+            "risks": [], "research_gaps": [], "source_assessments": []
+        }
+        with patch.object(stylepilot, "search_web", return_value=(sources, [], meeting - timedelta(days=30), date.today())):
+            with patch.object(stylepilot, "build_briefing", return_value=briefing):
+                response = self.client.post("/api/research", json={
+                    "company": "Example Ltd", "meeting_date": meeting.isoformat()
+                })
+        self.assertEqual(response.status_code, 200)
+        result = response.get_json()
+        self.assertEqual(result["sources"], [])
+        self.assertEqual(result["briefing"]["key_developments"], [])
+
     def test_valid_request_returns_briefing(self):
         meeting = date.today() + timedelta(days=2)
         sources = [{
@@ -49,7 +76,11 @@ class StylePilotTests(unittest.TestCase):
                 "why_it_matters": "Potential market impact.", "source_numbers": [1]
             }],
             "discussion_points": [], "open_questions": [], "opportunities": [],
-            "risks": [], "research_gaps": []
+            "risks": [], "research_gaps": [],
+            "source_assessments": [{
+                "source_number": 1, "relevance": "direct",
+                "reason": "The extract directly describes the product launch."
+            }]
         }
         with patch.object(stylepilot, "search_web", return_value=(sources, [], meeting - timedelta(days=30), date.today())):
             with patch.object(stylepilot, "build_briefing", return_value=briefing):
