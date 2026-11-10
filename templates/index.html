@@ -18,6 +18,17 @@
       <form id="research-form">
         <label for="company">WHO ARE YOU MEETING?</label>
         <input id="company" name="company" placeholder="Company or person's name" required minlength="2">
+        <label for="entity-type">ENTITY TYPE</label>
+        <select id="entity-type" name="entity-type">
+          <option value="auto">Choose automatically</option>
+          <option value="company">Company or organization</option>
+          <option value="person">Person or public figure</option>
+          <option value="brand">Brand</option>
+        </select>
+        <label for="industry">INDUSTRY <span class="optional">OPTIONAL</span></label>
+        <input id="industry" name="industry" placeholder="For example, technology or sportswear" maxlength="120">
+        <label for="meeting-context">MEETING CONTEXT <span class="optional">OPTIONAL</span></label>
+        <input id="meeting-context" name="meeting-context" placeholder="For example, product strategy or partnership discussion" maxlength="500">
         <label for="meeting-date">WHEN IS THE MEETING?</label>
         <input id="meeting-date" name="meeting-date" type="date" required>
         <button id="submit" type="submit">Prepare my briefing <span>→</span></button>

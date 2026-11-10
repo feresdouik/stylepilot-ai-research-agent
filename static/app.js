@@ -84,7 +84,10 @@ form.addEventListener("submit", async event => {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
         company: document.querySelector("#company").value.trim(),
-        meeting_date: dateInput.value
+        meeting_date: dateInput.value,
+        entity_type: document.querySelector("#entity-type").value,
+        industry: document.querySelector("#industry").value.trim(),
+        meeting_context: document.querySelector("#meeting-context").value.trim()
       })
     });
     const data = await response.json();

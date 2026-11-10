@@ -33,8 +33,278 @@ class StylePilotTests(unittest.TestCase):
         })
         self.assertEqual(response.status_code, 400)
 
+    def test_optional_resolution_context_is_validated_and_forwarded(self):
+        meeting = date.today() + timedelta(days=2)
+        with patch.object(stylepilot, "search_web", return_value=([], [], meeting - timedelta(days=30), date.today())) as search:
+            response = self.client.post("/api/research", json={
+                "company": "Example", "meeting_date": meeting.isoformat(),
+                "entity_type": "company", "industry": "technology",
+                "meeting_context": "Discuss a cloud partnership",
+            })
+        self.assertEqual(response.status_code, 404)
+        search.assert_called_once_with(
+            "Example", meeting, "technology", "Discuss a cloud partnership", "company"
+        )
 
-    def test_unassessed_sources_are_excluded_from_evidence(self):
+        invalid = self.client.post("/api/research", json={
+            "company": "Example", "meeting_date": meeting.isoformat(), "entity_type": "planet"
+        })
+        self.assertEqual(invalid.status_code, 400)
+
+    def test_dynamic_official_domains_for_common_companies_and_unknown(self):
+        class FakeResponse:
+            def __init__(self, body): self.body = body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+
+        cases = {
+            "Apple": "apple.com", "Adidas": "adidas.com", "Samsung": "samsung.com",
+            "Amazon": "amazon.com", "Tesla": "tesla.com", "Microsoft": "microsoft.com",
+            "Nike": "nike.com", "Zara": "inditex.com",
+        }
+        for name, domain in cases.items():
+            with self.subTest(company=name):
+                with patch.dict(stylepilot._official_domain_cache, {}, clear=True):
+                    responses = [
+                        FakeResponse({"search": [{"id": "Q123", "label": name, "description": "company"}]}),
+                        FakeResponse({"entities": {"Q123": {
+                            "labels": {"en": {"value": name}},
+                            "descriptions": {"en": {"value": "company"}},
+                            "claims": {
+                                "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q783794"}}}}],
+                                "P856": [{"mainsnak": {"datavalue": {"value": f"https://www.{domain}"}}}],
+                            },
+                        }}}),
+                    ]
+                    with patch.object(stylepilot.requests, "get", side_effect=responses):
+                        verified = stylepilot.discover_official_domains(name)
+                self.assertIn(domain, verified)
+                self.assertEqual(stylepilot.classify_source_type(name, f"https://{domain}/news", verified), "official_primary")
+
+    def test_unknown_or_ambiguous_entities_are_not_guessed_official(self):
+        class FakeResponse:
+            def __init__(self, body): self.body = body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+
+        with patch.dict(stylepilot._official_domain_cache, {}, clear=True):
+            with patch.object(stylepilot.requests, "get", return_value=FakeResponse({"search": []})):
+                verified = stylepilot.discover_official_domains("Unknown Example Company")
+        self.assertEqual(verified, set())
+        self.assertEqual(stylepilot.classify_source_type(
+            "Unknown Example Company", "https://unknownexamplecompany.com", verified
+        ), "secondary_or_unverified")
+
+    def test_verified_domain_matching_rejects_lookalikes_and_unrelated_domains(self):
+        classify = stylepilot.classify_source_type
+        verified = {"apple.com"}
+        self.assertEqual(classify("Apple", "https://www.apple.com/news", verified), "official_primary")
+        self.assertEqual(classify("Apple", "https://investors.apple.com/", verified), "official_primary")
+        self.assertEqual(classify("Apple", "https://apple.com.attacker.example/", verified), "secondary_or_unverified")
+        self.assertEqual(classify("Apple", "https://apple-investors.example/", verified), "secondary_or_unverified")
+
+    def test_ambiguous_exact_entities_fail_closed(self):
+        class FakeResponse:
+            def __init__(self, body): self.body = body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+        search = FakeResponse({"search": [
+            {"id": "Q1", "label": "Mercury", "description": "company"},
+            {"id": "Q2", "label": "Mercury", "description": "company"},
+        ]})
+        detail = FakeResponse({"entities": {
+            qid: {
+                "labels": {"en": {"value": "Mercury"}},
+                "descriptions": {"en": {"value": "energy company"}},
+                "claims": {
+                    "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q783794"}}}}],
+                    "P856": [{"mainsnak": {"datavalue": {"value": f"https://{qid.lower()}.example"}}}],
+                },
+            } for qid in ("Q1", "Q2")
+        }})
+        with patch.dict(stylepilot._official_domain_cache, {}, clear=True):
+            with patch.object(stylepilot.requests, "get", side_effect=[search, detail]):
+                self.assertEqual(stylepilot.discover_official_domains("Mercury"), set())
+
+    def test_entity_type_and_context_rank_official_candidates(self):
+        class FakeResponse:
+            def __init__(self, body): self.body = body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+
+        fixtures = {
+            "Apple": {
+                "industry": "technology", "entity_type": "company", "expected": "apple.com",
+                "candidates": [
+                    ("Q89", "apple", "edible fruit", "Q5", None),
+                    ("Q312", "Apple Inc.", "American multinational technology company", "Q783794", "https://www.apple.com/"),
+                    ("Q111", "Apple", "registered trademark owned by Apple", "Q431289", "https://brand.example/"),
+                ],
+            },
+            "Adidas": {
+                "industry": "sportswear", "entity_type": "company", "expected": "adidas.com",
+                "candidates": [
+                    ("Q123", "Adidas", "trade mark of Adidas AG", "Q431289", "https://adidas-group.com/"),
+                    ("Q303", "Adidas", "business", "Q4830453", None),
+                    ("Q3895", "Adidas AG", "German multinational corporation", "Q783794", "https://www.adidas.com/"),
+                ],
+            },
+            "Tesla": {
+                "industry": "automotive", "entity_type": "company", "expected": "tesla.com",
+                "candidates": [
+                    ("Q163343", "tesla", "SI unit of magnetic flux density", "QOTHER", None),
+                    ("Q478214", "Tesla", "American automotive and clean energy company", "Q783794", "https://www.tesla.com/"),
+                ],
+            },
+            "Microsoft": {
+                "industry": "technology", "entity_type": "company", "expected": "microsoft.com",
+                "candidates": [("Q2283", "Microsoft", "American multinational technology corporation", "Q167037", "https://www.microsoft.com/")],
+            },
+            "Taylor Swift": {
+                "industry": "music", "entity_type": "person", "expected": "taylorswift.com",
+                "candidates": [
+                    ("Q845783", "Taylor Swift", "2006 studio album", "QOTHER", None),
+                    ("Q26876", "Taylor Swift", "American singer-songwriter", "Q5", "https://taylorswift.com/"),
+                ],
+            },
+        }
+        for name, fixture in fixtures.items():
+            with self.subTest(entity=name):
+                candidates = fixture["candidates"]
+                search = FakeResponse({"search": [
+                    {"id": qid, "label": label, "description": description}
+                    for qid, label, description, _kind, _url in candidates
+                ]})
+                details = FakeResponse({"entities": {
+                    qid: {
+                        "labels": {"en": {"value": label}},
+                        "descriptions": {"en": {"value": description}},
+                        "claims": {
+                            "P31": [{"mainsnak": {"datavalue": {"value": {"id": kind}}}}],
+                            **({"P856": [{"mainsnak": {"datavalue": {"value": url}}}]} if url else {}),
+                        },
+                    }
+                    for qid, label, description, kind, url in candidates
+                }})
+                with patch.dict(stylepilot._official_domain_cache, {}, clear=True):
+                    with patch.object(stylepilot.requests, "get", side_effect=[search, details]):
+                        domains = stylepilot.discover_official_domains(
+                            name, fixture["industry"], "Leadership or product discussion", fixture["entity_type"]
+                        )
+                self.assertIn(fixture["expected"], domains)
+                self.assertEqual(stylepilot.classify_source_type(name, f"https://{fixture['expected']}/news", domains), "official_primary")
+
+    def test_context_does_not_break_mercury_tie_or_guess_first_result(self):
+        class FakeResponse:
+            def __init__(self, body): self.body = body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+        candidates = [
+            ("Q1", "Mercury", "energy company", "https://mercury-one.example"),
+            ("Q2", "Mercury", "energy company", "https://mercury-two.example"),
+        ]
+        search = FakeResponse({"search": [{"id": qid, "label": label} for qid, label, _desc, _url in candidates]})
+        details = FakeResponse({"entities": {
+            qid: {
+                "labels": {"en": {"value": label}},
+                "descriptions": {"en": {"value": description}},
+                "claims": {
+                    "P31": [{"mainsnak": {"datavalue": {"value": {"id": "Q783794"}}}}],
+                    "P856": [{"mainsnak": {"datavalue": {"value": url}}}],
+                },
+            } for qid, label, description, url in candidates
+        }})
+        with patch.dict(stylepilot._official_domain_cache, {}, clear=True):
+            with patch.object(stylepilot.requests, "get", side_effect=[search, details]):
+                domains = stylepilot.discover_official_domains("Mercury", "energy", "Supplier meeting", "company")
+        self.assertEqual(domains, set())
+
+    def test_search_web_separates_undated_and_out_of_window_results(self):
+        today = date.today()
+        meeting = today + timedelta(days=5)
+        old_date = (meeting - timedelta(days=31)).isoformat()
+        responses = [
+            {"results": [
+                {"title": "Undated", "url": "https://example.com/undated", "published_date": None},
+                {"title": "Too old", "url": "https://example.com/old", "published_date": old_date},
+                {"title": "Inside window", "url": "https://example.com/current", "published_date": today.isoformat()},
+            ]},
+            {"results": []},
+        ]
+        class FakeResponse:
+            def __init__(self, body): self.body = body
+            def raise_for_status(self): pass
+            def json(self): return self.body
+        with patch.dict("os.environ", {"TAVILY_API_KEY": "test-key"}):
+            with patch.object(stylepilot.requests, "post", side_effect=[FakeResponse(x) for x in responses]) as search_post:
+                with patch.object(stylepilot, "discover_official_domains", return_value=set()):
+                    dated, undated, start, end = stylepilot.search_web(
+                        "Nike", meeting, "sportswear", "partnership meeting", "company"
+                    )
+        self.assertIn("sportswear", search_post.call_args_list[0].kwargs["json"]["query"])
+        self.assertIn("partnership meeting", search_post.call_args_list[0].kwargs["json"]["query"])
+        self.assertEqual([s["title"] for s in dated], ["Inside window"])
+        self.assertEqual([s["title"] for s in undated], ["Undated"])
+        self.assertEqual(start, meeting - timedelta(days=30))
+        self.assertEqual(end, today)
+
+    def test_assessment_parser_marks_missing_malformed_and_unknown_explicitly(self):
+        sources = [{"source_type": "secondary_or_unverified"} for _ in range(4)]
+        parsed = stylepilot.normalize_source_assessments([
+            {"source_number": 1, "relevance": "direct", "reason": "Relevant"},
+            {"source_number": 2, "relevance": "maybe"},
+            "malformed entry",
+            {"source_number": 4, "relevance": "irrelevant"},
+        ], sources)
+        self.assertEqual([a["relevance"] for a in parsed], ["direct", "unassessed", "unassessed", "irrelevant"])
+
+    def test_invalid_citations_are_removed_and_unassessed_source_is_not_evidence(self):
+        meeting = date.today() + timedelta(days=2)
+        sources = [{
+            "title": "Article", "url": "https://example.com/story", "content": "Claim",
+            "published_date": date.today().isoformat(), "score": 0.8,
+            "source_type": "secondary_or_unverified",
+        }]
+        briefing = {
+            "executive_summary": "Unsupported claim.", "executive_summary_source_numbers": [1, 99, True],
+            "key_developments": [{"title": "Claim", "detail": "Claim", "source_numbers": [1, 99, True]}],
+            "discussion_points": [], "open_questions": [], "opportunities": [], "risks": [],
+            "research_gaps": [], "source_assessments": [{"source_number": 1, "relevance": "unknown"}],
+        }
+        with patch.object(stylepilot, "search_web", return_value=(sources, [], meeting - timedelta(days=30), date.today())):
+            with patch.object(stylepilot, "build_briefing", return_value=briefing):
+                response = self.client.post("/api/research", json={"company": "Example Ltd", "meeting_date": meeting.isoformat()})
+        result = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(result["sources"]), 1)  # Kept visible, explicitly unassessed.
+        self.assertEqual(result["briefing"]["source_assessments"][0]["relevance"], "unassessed")
+        self.assertEqual(result["briefing"]["executive_summary_source_numbers"], [])
+        self.assertIn("No sufficiently assessed sources", result["briefing"]["executive_summary"])
+        self.assertEqual(result["briefing"]["key_developments"], [])
+
+    def test_empty_but_valid_briefing_returns_success_without_fabrication(self):
+        meeting = date.today() + timedelta(days=2)
+        sources = [{
+            "title": "Unrelated article", "url": "https://example.com/story", "content": "Unrelated",
+            "published_date": date.today().isoformat(), "score": 0.8,
+            "source_type": "secondary_or_unverified",
+        }]
+        briefing = {
+            "executive_summary": "", "executive_summary_source_numbers": [], "key_developments": [],
+            "discussion_points": [], "open_questions": [], "opportunities": [], "risks": [],
+            "research_gaps": [], "source_assessments": [{"source_number": 1, "relevance": "irrelevant"}],
+        }
+        with patch.object(stylepilot, "search_web", return_value=(sources, [], meeting - timedelta(days=30), date.today())):
+            with patch.object(stylepilot, "build_briefing", return_value=briefing):
+                response = self.client.post("/api/research", json={"company": "Example Ltd", "meeting_date": meeting.isoformat()})
+        self.assertEqual(response.status_code, 200)
+        result = response.get_json()
+        self.assertEqual(result["sources"], [])
+        self.assertEqual(result["briefing"]["key_developments"], [])
+        self.assertIn("No sufficiently assessed sources", result["briefing"]["executive_summary"])
+
+
+    def test_unassessed_sources_remain_visible_but_are_not_evidence(self):
         meeting = date.today() + timedelta(days=2)
         sources = [{
             "title": "Unassessed article", "url": "https://example.com/news",
@@ -57,7 +327,8 @@ class StylePilotTests(unittest.TestCase):
                 })
         self.assertEqual(response.status_code, 200)
         result = response.get_json()
-        self.assertEqual(result["sources"], [])
+        self.assertEqual(len(result["sources"]), 1)
+        self.assertEqual(result["briefing"]["source_assessments"][0]["relevance"], "unassessed")
         self.assertEqual(result["briefing"]["key_developments"], [])
         self.assertIn("No sufficiently assessed sources", result["briefing"]["executive_summary"])
 

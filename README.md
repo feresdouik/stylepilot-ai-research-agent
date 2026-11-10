@@ -17,6 +17,7 @@ For a future meeting, the search window ends at the current date because future 
 ## Features
 
 - Evidence-first meeting preparation for companies and people across industries.
+- Context-aware entity resolution using Wikidata descriptions, entity types, industry, and meeting context.
 - 30-day date window anchored to the meeting date.
 - Dated-source filtering before AI synthesis.
 - Key developments with source-number references.
@@ -45,11 +46,11 @@ For a future meeting, the search window ends at the current date because future 
 4. Copy `.env.example` to `.env` and add your keys:
 
    ```env
-   TAVILY_API_KEY=your_tavily_api_key
-   GROQ_API_KEY=your_groq_api_key
-   GROQ_MODEL=llama-3.3-70b-versatile
-   GROQ_BASE_URL=https://api.groq.com/openai/v1
+   TAVILY_API_KEY=replace_with_your_tavily_api_key
+   GROQ_API_KEY=replace_with_your_groq_api_key
    ```
+
+   These are the exact required environment variable names. The Groq endpoint and model are currently pinned in `app.py`; `GROQ_MODEL` and `GROQ_BASE_URL` are not read by the application.
 
 5. Start the app:
 
@@ -70,7 +71,7 @@ For a future meeting, the search window ends at the current date because future 
 ## API
 
 - `GET /health` — app status and boolean API-configuration indicators.
-- `POST /api/research` — JSON body: `{"company":"Example Ltd","meeting_date":"2026-11-20"}`.
+- `POST /api/research` — required JSON fields: `company`, `meeting_date`; optional disambiguation fields: `entity_type` (`auto`, `company`, `person`, or `brand`), `industry`, and `meeting_context`.
 
 ## Environment variables
 
@@ -78,10 +79,10 @@ For a future meeting, the search window ends at the current date because future 
 |---|---|---|
 | `TAVILY_API_KEY` | Yes | Tavily Search API authentication |
 | `GROQ_API_KEY` | Yes | Groq LLM provider authentication |
-| `GROQ_MODEL` | No | Model name; defaults to `llama-3.3-70b-versatile` |
-| `GROQ_BASE_URL` | No | Groq OpenAI-compatible API base URL |
 | `PORT` | No | Local server port; defaults to `5000` |
 | `FLASK_DEBUG` | No | Enable Flask debug mode only for local development |
+
+Official domains are accepted only when a confidently ranked Wikidata entity has an official-website claim. If the entity remains ambiguous, its sources stay unverified; use the optional entity type, industry, or meeting context fields to clarify the match.
 
 ## Tests
 
