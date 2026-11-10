@@ -315,14 +315,100 @@ class StylePilotTests(unittest.TestCase):
             ["direct", "contextual", "irrelevant", "unassessed", "direct", "unassessed"],
         )
         output_format = groq_post.call_args.kwargs["json"]["response_format"]
+        request_payload = groq_post.call_args.kwargs["json"]
         self.assertEqual(output_format["type"], "json_schema")
         self.assertTrue(output_format["json_schema"]["strict"])
+        self.assertFalse(request_payload["include_reasoning"])
+        self.assertEqual(request_payload["max_completion_tokens"], 3072)
+        prompt = request_payload["messages"][-1]["content"]
+        self.assertIn("Include every required key", prompt)
+        self.assertIn('"direct", "contextual", "irrelevant", and "unassessed"', prompt)
+        self.assertIn("no other keys or properties", prompt)
         schema = output_format["json_schema"]["schema"]
         self.assertIn("source_assessments", schema["required"])
         self.assertEqual(
             schema["properties"]["source_assessments"]["items"]["properties"]["relevance"]["enum"],
             ["direct", "contextual", "irrelevant", "unassessed"],
         )
+        self.assertEqual(schema["properties"]["executive_summary_source_numbers"]["items"], {"type": "integer"})
+        development = schema["properties"]["key_developments"]["items"]
+        assessment = schema["properties"]["source_assessments"]["items"]
+        self.assertEqual(development["properties"]["source_numbers"]["items"], {"type": "integer"})
+        self.assertEqual(assessment["properties"]["source_number"], {"type": "integer"})
+        for object_schema in (schema, development, assessment):
+            self.assertFalse(object_schema["additionalProperties"])
+            self.assertEqual(set(object_schema["required"]), set(object_schema["properties"]))
+
+        def check_strict_objects(node):
+            if isinstance(node, dict):
+                if node.get("type") == "object":
+                    self.assertFalse(node.get("additionalProperties", True))
+                    self.assertEqual(set(node.get("required", [])), set(node.get("properties", {})))
+                for value in node.values():
+                    check_strict_objects(value)
+            elif isinstance(node, list):
+                for value in node:
+                    check_strict_objects(value)
+        check_strict_objects(schema)
+
+    def test_groq_json_validation_error_redacts_failed_generation(self):
+        meeting = date.today() + timedelta(days=2)
+        private_text = "PRIVATE_SOURCE_EXCERPT_92d128"
+        sources = [{
+            "title": "Private meeting source", "url": "https://example.com/private",
+            "content": private_text, "published_date": date.today().isoformat(),
+            "score": 0.8, "source_type": "secondary_or_unverified",
+        }]
+        class ProviderErrorResponse:
+            status_code = 400
+            text = "This raw body must not be logged."
+            def json(self):
+                return {"error": {
+                    "message": "Failed to validate JSON. Please adjust your prompt. See 'failed_generation' for more details.",
+                    "type": "invalid_request_error", "code": "json_validate_failed",
+                    "failed_generation": private_text,
+                }}
+        provider_response = ProviderErrorResponse()
+        error = stylepilot.requests.HTTPError("provider rejected JSON", response=provider_response)
+        with patch.object(stylepilot, "search_web", return_value=(sources, [], meeting - timedelta(days=30), date.today())):
+            with patch.object(stylepilot, "build_briefing", side_effect=error):
+                with self.assertLogs("app", level="WARNING") as captured:
+                    response = self.client.post("/api/research", json={
+                        "company": "Example Ltd", "meeting_date": meeting.isoformat(),
+                    })
+        self.assertEqual(response.status_code, 502)
+        body = response.get_json()
+        self.assertEqual(body["provider_error_code"], "json_validate_failed")
+        self.assertIn("could not validate the generated JSON", body["error"])
+        diagnostic = "\n".join(captured.output)
+        self.assertIn("failed_generation_present=True", diagnostic)
+        self.assertNotIn(private_text, diagnostic)
+        self.assertNotIn(private_text, body["error"])
+        self.assertNotIn("raw body", diagnostic)
+
+    def test_malformed_groq_provider_error_body_uses_safe_generic_reason(self):
+        class MalformedProviderError:
+            status_code = 400
+            text = "PRIVATE_RAW_RESPONSE_SHOULD_NOT_ESCAPE"
+            def json(self): raise ValueError("malformed JSON")
+        details = stylepilot._safe_groq_error_details(MalformedProviderError())
+        self.assertIn("detailed provider text was redacted", details["message"])
+        self.assertFalse(details["failed_generation_present"])
+        self.assertNotIn("PRIVATE_RAW_RESPONSE", details["message"])
+
+    def test_safe_groq_error_keeps_diagnostic_message_and_redacts_private_fragments(self):
+        private_text = "Confidential source excerpt with distinctive wording."
+        class ProviderError:
+            def json(self):
+                return {"error": {
+                    "message": f"Invalid response_format near {private_text}; bearer sample-secret-value",
+                    "type": "invalid_request_error", "code": "invalid_schema",
+                }}
+        details = stylepilot._safe_groq_error_details(ProviderError(), [private_text])
+        self.assertIn("Invalid response_format", details["message"])
+        self.assertIn("invalid_schema", details["code"] or "")
+        self.assertNotIn(private_text, details["message"])
+        self.assertNotIn("sample-secret-value", details["message"])
 
     def test_malformed_groq_json_logs_structure_without_content_and_fails_clearly(self):
         malformed = '{"source_assessments":[{"relevance":"direct"}] SECRET_SENTINEL'
