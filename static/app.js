@@ -36,8 +36,27 @@ function render(data) {
       const source = data.sources[number - 1];
       return source ? `<a href="${safeSourceUrl(source.url)}" target="_blank" rel="noopener noreferrer">[${number}]</a>` : "";
     }).join(" ");
+    const eventLabels = {
+      newly_announced: "Newly announced",
+      older_event: "Older event · background",
+      timing_unclear: "Timing unclear",
+      not_applicable: "No event date identified"
+    };
+    const eventBadge = item.event_status
+      ? `<small>${escapeHtml(eventLabels[item.event_status] || "Timing unclear")}${item.event_date ? ` · ${escapeHtml(item.event_date)}` : ""}</small>`
+      : "";
+    const financialLabels = {
+      officially_reported_historical_result: "Officially reported historical result",
+      company_forward_looking_estimate: "Company forward-looking estimate",
+      analyst_estimate_or_opinion: "Analyst estimate or opinion",
+      unverified_secondary_reporting: "Unverified secondary reporting"
+    };
+    const claimType = financialLabels[item.financial_claim_type]
+      ? `<small>Evidence type: ${escapeHtml(financialLabels[item.financial_claim_type])}</small>`
+      : "";
     return `<article class="development">
       <h3>${escapeHtml(item.title || "Development")}</h3>
+      ${eventBadge}${claimType}
       <p>${escapeHtml(item.detail || "")}</p>
       <p><strong>Why it matters:</strong> ${escapeHtml(item.why_it_matters || "")}</p>
       <small>Evidence: ${citations || "No source reference supplied"}</small>
@@ -47,19 +66,36 @@ function render(data) {
   const sources = (data.sources || []).map((source, index) => {
     const assessment = assessmentByNumber.get(index + 1);
     const relevance = assessment ? assessment.relevance : "unassessed";
+    const relevanceLabels = {
+      direct: "Direct relevance",
+      contextual: "Contextual relevance",
+      irrelevant: "Irrelevant",
+      unassessed: "Unassessed relevance"
+    };
     const typeLabels = {
-      official_primary: "OFFICIAL / PRIMARY",
-      reputable_reporting: "NEWS / TRADE REPORTING",
-      secondary_or_unverified: "SECONDARY / VERIFY"
+      official_primary: "Official primary source",
+      reputable_reporting: "Secondary reporting source",
+      secondary_or_unverified: "Secondary source · verify provenance"
     };
     const sourceType = typeLabels[source.source_type] || "SOURCE TYPE UNKNOWN";
     const reason = assessment && assessment.reason ? `<p>${escapeHtml(assessment.reason)}</p>` : "";
-    return `<div class="source"><strong>[${index + 1}] ${escapeHtml(relevance.toUpperCase())} · ${escapeHtml(sourceType)}</strong> <a href="${safeSourceUrl(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a><p>${escapeHtml(source.published_date)}</p>${reason}</div>`;
+    const provenanceNote = source.issuer_provenance === "verified_company_issued"
+      ? `<p>Company-issued release verified against <a href="${safeSourceUrl(source.verification_evidence?.[0]?.url)}" target="_blank" rel="noopener noreferrer">an official company page</a>. Publisher: ${escapeHtml(source.publisher_domain || "unknown")}</p>`
+      : source.publisher_domain ? `<p>Publisher: ${escapeHtml(source.publisher_domain)}</p>` : "";
+    const eventDate = source.event_date || source.event_date_text;
+    const eventNote = eventDate ? `<p>Event/effective date: ${escapeHtml(eventDate)}${source.event_date_type ? ` (${escapeHtml(source.event_date_type)})` : ""}</p>` : "";
+    return `<div class="source"><strong>[${index + 1}] ${escapeHtml(relevanceLabels[relevance] || "Unassessed relevance")} · ${escapeHtml(sourceType)}</strong> <a href="${safeSourceUrl(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a><p>Published: ${escapeHtml(source.published_date)}</p>${eventNote}${provenanceNote}${reason}</div>`;
   }).join("");
   resultsBox.innerHTML = `
     <div class="result-heading"><div><p class="eyebrow">YOUR MEETING BRIEFING</p><h2>${escapeHtml(data.company)}</h2></div><button class="print-button" type="button" onclick="window.print()">Print / Save PDF</button></div>
     <p class="muted">Meeting: ${escapeHtml(data.meeting_date)} · Evidence window: ${escapeHtml(data.window_start)} – ${escapeHtml(data.window_end)}</p>
     <h3>Executive summary</h3><p>${escapeHtml(b.executive_summary || "No summary available.")}</p>
+    ${b.executive_summary_claim_type ? `<p class="muted">Financial evidence type: ${escapeHtml(({
+      officially_reported_historical_result: "Officially reported historical result",
+      company_forward_looking_estimate: "Company forward-looking estimate",
+      analyst_estimate_or_opinion: "Analyst estimate or opinion",
+      unverified_secondary_reporting: "Unverified secondary reporting"
+    })[b.executive_summary_claim_type] || "Unverified" )}</p>` : ""}
     <h3>Key developments</h3>${developments || "<p>No developments extracted.</p>"}
     <h3>Discussion points</h3>${renderList(b.discussion_points)}
     <h3>Open questions</h3>${renderList(b.open_questions)}

@@ -486,6 +486,47 @@ class StylePilotTests(unittest.TestCase):
         self.assertIn("No sufficiently assessed sources", result["briefing"]["executive_summary"])
         self.assertEqual(result["briefing"]["key_developments"], [])
 
+    def test_citations_remain_aligned_after_leading_source_is_filtered(self):
+        meeting = date.today() + timedelta(days=2)
+        sources = [{
+            "title": "Irrelevant lead", "url": "https://other.example/story",
+            "content": "Different subject.", "published_date": date.today().isoformat(),
+            "source_type": "secondary_or_unverified", "score": 0.9,
+        }, {
+            "title": "Relevant source two", "url": "https://entity.example/two",
+            "content": "Relevant fact two.", "published_date": date.today().isoformat(),
+            "source_type": "secondary_or_unverified", "score": 0.8,
+        }, {
+            "title": "Relevant source three", "url": "https://entity.example/three",
+            "content": "Relevant fact three.", "published_date": date.today().isoformat(),
+            "source_type": "secondary_or_unverified", "score": 0.7,
+        }]
+        briefing = {
+            "executive_summary": "A fact from source three.", "executive_summary_source_numbers": [3],
+            "key_developments": [{"title": "A fact", "detail": "Source three reports it.",
+                                  "why_it_matters": "Discussion topic.", "source_numbers": [3]}],
+            "discussion_points": [], "open_questions": [], "opportunities": [], "risks": [],
+            "research_gaps": [], "source_assessments": [
+                {"source_number": 1, "relevance": "irrelevant", "reason": "Different entity."},
+                {"source_number": 2, "relevance": "direct", "reason": "About entity."},
+                {"source_number": 3, "relevance": "contextual", "reason": "Relevant context."},
+            ],
+        }
+        with patch.object(stylepilot, "search_web", return_value=(sources, [], meeting - timedelta(days=30), date.today())):
+            with patch.object(stylepilot, "build_briefing", return_value=briefing):
+                response = self.client.post("/api/research", json={
+                    "company": "Example Co", "meeting_date": meeting.isoformat()
+                })
+        result = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([source["url"] for source in result["sources"]], [
+            "https://entity.example/two", "https://entity.example/three"
+        ])
+        self.assertEqual(result["briefing"]["executive_summary_source_numbers"], [2])
+        self.assertEqual(result["briefing"]["key_developments"][0]["source_numbers"], [2])
+        cited = result["sources"][result["briefing"]["key_developments"][0]["source_numbers"][0] - 1]
+        self.assertEqual(cited["url"], "https://entity.example/three")
+
     def test_empty_but_valid_briefing_returns_success_without_fabrication(self):
         meeting = date.today() + timedelta(days=2)
         sources = [{
@@ -569,9 +610,190 @@ class StylePilotTests(unittest.TestCase):
                 })
         result = response.get_json()
         self.assertEqual(response.status_code, 200)
-        self.assertIn("does not include an official primary source", result["briefing"]["executive_summary"])
+        self.assertIn("cited evidence does not verify", result["briefing"]["executive_summary"])
         self.assertEqual(result["briefing"]["key_developments"], [])
-        self.assertTrue(any("Official primary evidence is missing" in gap for gap in result["briefing"]["research_gaps"]))
+        self.assertTrue(any("Secondary evidence is available but is not independently verified" in gap for gap in result["briefing"]["research_gaps"]))
+
+    def test_syndicated_release_requires_exact_first_party_corroboration(self):
+        official = {
+            "title": "Example Group announces annual investor day",
+            "url": "https://investors.example.org/news/investor-day",
+            "content": "Example Group announces annual investor day. The event takes place November 16 and 17 with a live webcast for shareholders.",
+            "source_type": "official_primary", "publisher_domain": "investors.example.org",
+        }
+        distributed = {
+            "title": "Example Group announces annual investor day",
+            "url": "https://wire.example.net/releases/annual-investor-day",
+            "content": "Example Group announces annual investor day. The event takes place November 16 and 17 with a live webcast for shareholders. The company also achieved $999 billion in savings.",
+            "source_type": "secondary_or_unverified", "publisher_domain": "wire.example.net",
+        }
+        lookalike_title = {
+            "title": "Example Group: market commentary",
+            "url": "https://wire.example.net/releases/commentary",
+            "source_type": "secondary_or_unverified", "publisher_domain": "wire.example.net",
+        }
+        copied_headline = {
+            "title": "Example Group announces annual investor day",
+            "url": "https://wire.example.net/releases/copied-headline",
+            "content": "Example Group announces annual investor day. A different story concerns unrelated market activity and broad investor sentiment.",
+            "source_type": "secondary_or_unverified", "publisher_domain": "wire.example.net",
+        }
+        headline_only = {
+            "title": "Example Group announces annual investor day",
+            "url": "https://wire.example.net/releases/headline-only",
+            "content": "Example Group announces annual investor day.",
+            "source_type": "secondary_or_unverified", "publisher_domain": "wire.example.net",
+        }
+        sources = [official, distributed, lookalike_title, copied_headline, headline_only]
+        stylepilot.verify_syndicated_releases(sources)
+        self.assertEqual(distributed["source_type"], "official_primary")
+        self.assertEqual(distributed["issuer_provenance"], "verified_company_issued")
+        self.assertEqual(distributed["publisher_domain"], "wire.example.net")
+        self.assertEqual(distributed["verification_evidence"][0]["url"], official["url"])
+        self.assertEqual(distributed["content"], official["content"])
+        self.assertFalse(stylepilot.financial_claim_has_support(
+            "The company achieved $999 billion in savings.", [1], [distributed]
+        )[0], "Distributor-only appended claims must not become primary evidence.")
+        self.assertEqual(lookalike_title["source_type"], "secondary_or_unverified")
+        self.assertEqual(lookalike_title["issuer_provenance"], "unverified_third_party")
+        self.assertEqual(copied_headline["source_type"], "secondary_or_unverified")
+        self.assertEqual(headline_only["source_type"], "secondary_or_unverified")
+
+    def test_event_date_extraction_does_not_infer_missing_year(self):
+        exact = stylepilot.extract_event_date({
+            "title": "CFO transition", "content": "The appointment is effective 2026-08-17."
+        })
+        self.assertEqual(exact, ("2026-08-17", "2026-08-17", "effective"))
+        yearless = stylepilot.extract_event_date({
+            "title": "CFO transition", "content": "The appointment is effective August 17."
+        })
+        self.assertEqual(yearless, (None, "August 17", "effective"))
+        article = stylepilot.extract_event_date({
+            "title": "CFO appointment", "content": "This article was published October 23. The appointment is effective August 17."
+        })
+        self.assertEqual(article, (None, "August 17", "effective"))
+
+    def test_financial_support_is_claim_specific_and_recognizes_basis_points(self):
+        sources = [
+            {"source_type": "official_primary", "title": "Other results", "content": "Profit was $1 million."},
+            {"source_type": "official_primary", "title": "Quarterly report", "content": "Revenue fell 4 percent. Gross margin expanded 60 basis points to 42.8 percent."},
+        ]
+        self.assertTrue(stylepilot.requires_official_evidence("Gross margin improved 60 basis points."))
+        self.assertFalse(stylepilot.financial_claim_has_support(
+            "Gross margin improved 60 basis points.", [1], sources
+        )[0])
+        supported, category, _ = stylepilot.financial_claim_has_support(
+            "Gross margin expanded 60 basis points to 42.8 percent.", [2], sources
+        )
+        self.assertTrue(supported)
+        self.assertEqual(category, "officially_reported_historical_result")
+        source = [{
+            "source_type": "official_primary",
+            "content": "Revenue declined 4 percent. Gross margin improved 60 basis points.",
+        }]
+        # The amount and the word "revenue" both occur, but the 60 bps value
+        # belongs to gross margin, not revenue.
+        self.assertFalse(stylepilot.financial_claim_has_support(
+            "Revenue improved 60 basis points.", [1], source
+        )[0])
+        self.assertFalse(stylepilot.financial_claim_has_support(
+            "Revenue increased 4 percent.", [1], source
+        )[0], "A matching number with the opposite direction is not support.")
+
+    def test_official_source_elsewhere_does_not_validate_wrong_financial_citation(self):
+        meeting = date.today() + timedelta(days=2)
+        sources = [{
+            "title": "Other company figure", "url": "https://company.example/other",
+            "content": "The official report says revenue increased 99 percent.",
+            "published_date": date.today().isoformat(), "source_type": "official_primary",
+            "issuer_provenance": "first_party_domain", "score": 0.9,
+        }, {
+            "title": "Actual quarter result", "url": "https://company.example/results",
+            "content": "The official report says revenue declined 4 percent.",
+            "published_date": date.today().isoformat(), "source_type": "official_primary",
+            "issuer_provenance": "first_party_domain", "score": 0.8,
+        }]
+        briefing = {
+            "executive_summary": "Revenue declined 4 percent.", "executive_summary_source_numbers": [1],
+            "key_developments": [{"title": "Revenue decline", "detail": "Revenue declined 4 percent.",
+                                  "why_it_matters": "Discussion topic.", "source_numbers": [1]}],
+            "discussion_points": [], "open_questions": [], "opportunities": [], "risks": [],
+            "research_gaps": [], "source_assessments": [
+                {"source_number": 1, "relevance": "direct", "reason": "About the company."},
+                {"source_number": 2, "relevance": "direct", "reason": "About the company."},
+            ],
+        }
+        with patch.object(stylepilot, "search_web", return_value=(sources, [], meeting - timedelta(days=30), date.today())):
+            with patch.object(stylepilot, "build_briefing", return_value=briefing):
+                response = self.client.post("/api/research", json={
+                    "company": "Example Co", "meeting_date": meeting.isoformat()
+                })
+        result = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(result["briefing"]["key_developments"], [])
+        self.assertEqual(result["briefing"]["executive_summary_source_numbers"], [])
+        self.assertTrue(any("does not support the specific claim" in gap for gap in result["briefing"]["research_gaps"]))
+
+    def test_company_estimate_is_not_labeled_as_achieved_result(self):
+        source = {
+            "source_type": "official_primary", "issuer_provenance": "first_party_domain",
+            "title": "Company outlook", "content": "The company expects $2.5 billion in cumulative savings through fiscal 2031. Actual savings may differ.",
+        }
+        claim = "The company expects $2.5 billion in cumulative savings through fiscal 2031."
+        supported, category, _ = stylepilot.financial_claim_has_support(claim, [1], [source])
+        self.assertTrue(supported)
+        self.assertEqual(category, "company_forward_looking_estimate")
+        self.assertIn("$2.5 billion", source["content"])
+        achieved_claim = "The company saved $2.5 billion through fiscal 2031."
+        self.assertFalse(stylepilot.financial_claim_has_support(achieved_claim, [1], [source])[0])
+
+    def test_research_gap_reasons_distinguish_evidence_states(self):
+        secondary = {"source_type": "reputable_reporting"}
+        official = {"source_type": "official_primary"}
+        self.assertIn("Secondary evidence is available", stylepilot.financial_research_gap("4% revenue decline", [secondary]))
+        self.assertIn("Official evidence was not found", stylepilot.financial_research_gap("4% revenue decline", []))
+        self.assertIn("does not support the specific claim", stylepilot.financial_research_gap("4% revenue decline", [official]))
+        stylepilot._out_of_window_sources.set(({
+            "source_type": "official_primary", "title": "Old annual report", "published_date": "2026-09-01"
+        },))
+        self.assertIn("falls outside the 30-day publication window", stylepilot.financial_research_gap("4% revenue decline", []))
+        stylepilot._out_of_window_sources.set(())
+
+    def test_ui_explicitly_separates_relevance_and_provenance_labels(self):
+        from pathlib import Path
+        source = Path(stylepilot.__file__).parent / "static" / "app.js"
+        ui = source.read_text(encoding="utf-8")
+        self.assertIn('direct: "Direct relevance"', ui)
+        self.assertIn('contextual: "Contextual relevance"', ui)
+        self.assertIn('official_primary: "Official primary source"', ui)
+        self.assertIn('secondary_or_unverified: "Secondary source · verify provenance"', ui)
+
+    def test_explicit_old_event_date_cannot_be_marked_newly_announced(self):
+        meeting = date.today()
+        source = {
+            "title": "Leadership update", "url": "https://company.example/leadership",
+            "content": "The appointment is effective 2026-08-17.",
+            "published_date": "2026-10-23", "event_date": "2026-08-17",
+            "event_date_text": "2026-08-17", "event_date_type": "effective",
+            "source_type": "official_primary",
+        }
+        briefing = {
+            "executive_summary": "A leadership article was published.", "executive_summary_source_numbers": [1],
+            "key_developments": [{"title": "Appointment", "detail": "Appointment effective 2026-08-17.",
+                                  "why_it_matters": "Context.", "event_date": "2026-08-17",
+                                  "event_status": "newly_announced", "source_numbers": [1]}],
+            "discussion_points": [], "open_questions": [], "opportunities": [], "risks": [],
+            "research_gaps": [], "source_assessments": [{"source_number": 1, "relevance": "direct", "reason": "About entity."}],
+        }
+        class FakeResponse:
+            status_code = 200
+            headers = {}
+            def raise_for_status(self): pass
+            def json(self): return {"choices": [{"message": {"content": json.dumps(briefing)}}]}
+        with patch.dict("os.environ", {"GROQ_API_KEY": "test-key"}):
+            with patch.object(stylepilot.requests, "post", return_value=FakeResponse()):
+                result = stylepilot.build_briefing("Example company", meeting, [source], meeting - timedelta(days=30), meeting)
+        self.assertEqual(result["key_developments"][0]["event_status"], "older_event")
 
     def test_valid_request_returns_briefing(self):
         meeting = date.today() + timedelta(days=2)

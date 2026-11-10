@@ -3,6 +3,7 @@ import time
 import logging
 import os
 import threading
+from contextvars import ContextVar
 from datetime import date, datetime, timedelta
 from urllib.parse import urlparse
 
@@ -22,6 +23,7 @@ WIKIDATA_TIMEOUT = (3, 5)
 OFFICIAL_DOMAIN_CACHE_TTL = timedelta(hours=6)
 _official_domain_cache = {}
 _official_domain_cache_lock = threading.Lock()
+_out_of_window_sources = ContextVar("stylepilot_out_of_window_sources", default=())
 
 _PERSON_TYPE_IDS = {"Q5"}
 _COMPANY_TYPE_IDS = {
@@ -252,6 +254,87 @@ def classify_source_type(company: str, source_url: str, verified_domains=None) -
     return "secondary_or_unverified"
 
 
+def _publisher_domain(source_url):
+    return (urlparse(source_url or "").hostname or "").lower().rstrip(".").removeprefix("www.")
+
+
+def _normalized_title(value):
+    import re
+    return " ".join(re.findall(r"[a-z0-9]+", str(value or "").casefold()))
+
+
+def _content_overlap(left, right, title=""):
+    import re
+    stopwords = {"the", "and", "for", "with", "from", "that", "this", "will", "has", "have", "its", "are", "was", "were"}
+    tokenize = lambda value: set(re.findall(r"[a-z0-9]{3,}", str(value or "").casefold())) - stopwords
+    title_tokens = tokenize(title)
+    left_tokens, right_tokens = tokenize(left) - title_tokens, tokenize(right) - title_tokens
+    if min(len(left_tokens), len(right_tokens)) < 4:
+        return 0.0
+    intersection = len(left_tokens & right_tokens)
+    if intersection < 4:
+        return 0.0
+    return intersection / min(len(left_tokens), len(right_tokens))
+
+
+def verify_syndicated_releases(sources):
+    """Corroborate distributor copies against an exact-title first-party page.
+
+    The distributor host is never trusted as issuer evidence. A matching official
+    page must already have been independently classified from a verified domain.
+    """
+    official_by_title = {}
+    for source in sources:
+        if source.get("source_type") == "official_primary":
+            title = _normalized_title(source.get("title"))
+            if title:
+                official_by_title.setdefault(title, []).append(source)
+    for source in sources:
+        if source.get("source_type") == "official_primary":
+            source.setdefault("issuer_provenance", "first_party_domain")
+            source.setdefault("verification_evidence", [{"type": "verified_official_domain", "url": source.get("url", "")}])
+            continue
+        title_matches = official_by_title.get(_normalized_title(source.get("title")), [])
+        # Exact-title first-party corroboration is intentionally conservative.
+        # Do not promote a similarly named or merely same-company article.
+        corroborating = [
+            official for official in title_matches
+            if _content_overlap(source.get("content"), official.get("content"), source.get("title")) >= 0.75
+        ]
+        if corroborating and source.get("publisher_domain"):
+            official = corroborating[0]
+            source["issuer_provenance"] = "verified_company_issued"
+            source["verification_evidence"] = [{
+                "type": "matching_title_and_content_on_verified_first_party_page",
+                "url": official.get("url", ""),
+            }]
+            source["source_type"] = "official_primary"
+            # Use only text present on the first-party corroborating page as
+            # claim evidence. A distributor may append unrelated or altered copy.
+            source["content"] = str(official.get("content") or "")
+            source["event_date"], source["event_date_text"], source["event_date_type"] = extract_event_date(source)
+        else:
+            source.setdefault("issuer_provenance", "unverified_third_party")
+            source.setdefault("verification_evidence", [])
+
+
+def extract_event_date(source):
+    """Extract only explicit event/effective date text, never infer a year."""
+    import re
+    text = " ".join((str(source.get("title") or ""), str(source.get("content") or "")))
+    pattern = re.compile(
+        r"\b(?P<kind>effective|takes effect|took effect|launched|launches|announced|held|opens|opened)"
+        r"(?:\s+on)?\s+(?P<date>(?:\d{4}-\d{2}-\d{2})|(?:[A-Z][a-z]+\s+\d{1,2}(?:,\s*\d{4})?))\b",
+        re.IGNORECASE,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None, None, None
+    raw_date = match.group("date")
+    parsed = parse_published_date(raw_date)
+    return (parsed.isoformat() if parsed else None), raw_date, match.group("kind").casefold()
+
+
 def _assessment_label(value):
     """Normalize known model labels without promoting unknown values to evidence."""
     import re
@@ -377,9 +460,11 @@ def briefing_json_schema(source_count):
             "title": {"type": "string"},
             "detail": {"type": "string"},
             "why_it_matters": {"type": "string"},
+            "event_date": {"type": "string"},
+            "event_status": {"type": "string", "enum": ["newly_announced", "older_event", "timing_unclear", "not_applicable"]},
             "source_numbers": {"type": "array", "items": number_schema},
         },
-        "required": ["title", "detail", "why_it_matters", "source_numbers"],
+        "required": ["title", "detail", "why_it_matters", "event_date", "event_status", "source_numbers"],
         "additionalProperties": False,
     }
     assessment = {
@@ -557,6 +642,7 @@ def search_web(company: str, meeting_date: date, industry="", meeting_context=""
         f'"{company}" {query_context} official results annual report investor relations financial results',
     ]
     results = []
+    out_of_window_sources = []
     for index, query in enumerate(queries, start=1):
         # Queries can contain sensitive meeting context; log only sequence/count.
         app.logger.info("Search query submitted index=%s", index)
@@ -589,11 +675,15 @@ def search_web(company: str, meeting_date: date, industry="", meeting_context=""
         source = {
             "title": item.get("title") or "Untitled source",
             "url": source_url,
+            "publisher_domain": _publisher_domain(source_url),
             "content": item.get("content") or "",
             "published_date": published.isoformat() if published else "Date not provided",
             "score": item.get("score"),
             "source_type": source_type,
+            "issuer_provenance": "first_party_domain" if source_type == "official_primary" else "unverified_third_party",
+            "verification_evidence": [],
         }
+        source["event_date"], source["event_date_text"], source["event_date_type"] = extract_event_date(source)
         parsed_url = urlparse(source["url"])
         # Provider date fields are untrusted; bound their log representation.
         safe_raw_date = published_raw[:80] if isinstance(published_raw, str) else None
@@ -612,11 +702,15 @@ def search_web(company: str, meeting_date: date, industry="", meeting_context=""
             disposition = "excluded_missing_date"
         else:
             disposition = "excluded_out_of_window"
+            out_of_window_sources.append(source)
         app.logger.info(
             "Search result index=%s raw_date=%r parsed_date=%s source_type=%s disposition=%s",
             len(dated_sources) + len(undated_sources), safe_raw_date,
             published.isoformat() if published else None, source_type, disposition,
         )
+
+    verify_syndicated_releases(dated_sources + out_of_window_sources)
+    _out_of_window_sources.set(tuple(out_of_window_sources))
 
     return dated_sources, undated_sources, start_date, search_end_date
 
@@ -628,14 +722,226 @@ def requires_official_evidence(text):
     financial_terms = (
         "revenue", "profit", "sales", "turnover", "financial results",
         "market share", "accounts for", "accounting for", "group sales",
+        "margin", "basis point", "savings", "forecast", "estimate", "guidance",
     )
     numeric_financial = re.search(
-        r"(?:\b\d+(?:[.,]\d+)?\s?%|"
+        r"(?:\b\d+(?:[.,]\d+)?\s?(?:%|\bpercent(?:age)?\b)|"
         r"(?:€|\$|£|rs\.?\s?)\s?\d|"
-        r"\b\d[\d,]*(?:\.\d+)?\s?(?:crore|million|billion|bn|m)\b)",
+        r"\b\d[\d,]*(?:\.\d+)?\s?(?:crore|million|billion|bn|m|basis\s+points?|bps)\b)",
         value,
     )
     return numeric_financial is not None or any(term in value for term in financial_terms)
+
+
+def _financial_tokens(text):
+    import re
+    value = str(text or "").casefold().replace(",", "")
+    matches = re.findall(
+        r"(?:(?:\$|€|£|rs\.?\s*)\s*)?\b(\d+(?:\.\d+)?)\s*(%|percent(?:age)?|basis\s+points?|bps|billion|million|crore|bn|m)?(?![a-z])",
+        value,
+    )
+    normalized = set()
+    for amount, unit in matches:
+        unit = unit.strip()
+        if unit in ("%", "percent", "percentage"):
+            unit = "percent"
+        elif unit in ("bps", "basis point", "basis points"):
+            unit = "basis_points"
+        elif unit in ("bn",):
+            unit = "billion"
+        elif unit == "m":
+            unit = "million"
+        normalized.add((amount.rstrip("0").rstrip(".") if "." in amount else amount, unit))
+    return normalized
+
+
+def _financial_facts_with_positions(text):
+    import re
+    value = str(text or "").casefold().replace(",", "")
+    pattern = re.compile(
+        r"(?:(?:\$|€|£|rs\.?\s*)\s*)?\b(?P<amount>\d+(?:\.\d+)?)\s*"
+        r"(?P<unit>%|percent(?:age)?|basis\s+points?|bps|billion|million|crore|bn|m)?(?![a-z])"
+    )
+    facts = []
+    for match in pattern.finditer(value):
+        amount = match.group("amount")
+        unit = (match.group("unit") or "").strip()
+        if unit in ("%", "percent", "percentage"):
+            unit = "percent"
+        elif unit in ("bps", "basis point", "basis points"):
+            unit = "basis_points"
+        elif unit == "bn":
+            unit = "billion"
+        elif unit == "m":
+            unit = "million"
+        amount = amount.rstrip("0").rstrip(".") if "." in amount else amount
+        facts.append(((amount, unit), match.start(), match.end()))
+    return facts
+
+
+def _financial_sentences(text):
+    import re
+    result = []
+    for sentence in re.split(r"(?<=[.!?])\s+|[;\n]+", str(text or "")):
+        result.extend(part.strip() for part in re.split(r"\b(?:but|whereas|although|while)\b", sentence, flags=re.IGNORECASE) if part.strip())
+    return result
+
+
+def _metric_mentions(text):
+    import re
+    patterns = (
+        ("gross_margin", r"\bgross\s+margins?\b"),
+        ("operating_margin", r"\boperating\s+margins?\b"),
+        ("net_margin", r"\bnet\s+margins?\b"),
+        ("market_share", r"\bmarket\s+share\b"),
+        ("revenue", r"\brevenues?\b"),
+        ("sales", r"\bsales\b"),
+        ("profit", r"\b(?:gross|operating|net)?\s*profits?\b"),
+        ("savings", r"\bsavings?\b"),
+        ("earnings", r"\bearnings?\b"),
+        ("margin", r"\bmargins?\b"),
+        ("cash_flow", r"\bcash\s+flow\b"),
+    )
+    mentions = []
+    for metric, pattern in patterns:
+        mentions.extend((metric, match.start(), match.end()) for match in re.finditer(pattern, str(text or "").casefold()))
+    return mentions
+
+
+def _nearest_metric(text, position):
+    mentions = _metric_mentions(text)
+    if not mentions:
+        return None
+    metric, _start, _end = min(mentions, key=lambda mention: min(abs(position - mention[1]), abs(position - mention[2])))
+    return metric
+
+
+def _compatible_metric(claim_metric, evidence_metric):
+    if claim_metric == "margin":
+        return evidence_metric in ("margin", "gross_margin", "operating_margin", "net_margin")
+    return claim_metric == evidence_metric
+
+
+def _direction_is_supported(claim_sentence, evidence_sentence):
+    value = str(claim_sentence or "").casefold()
+    evidence = str(evidence_sentence or "").casefold()
+    directions = (
+        ({"declined", "decline", "decreased", "decrease", "fell", "down", "lower", "reduced", "contracted"},
+         {"declined", "decline", "decreased", "decrease", "fell", "down", "lower", "reduced", "contracted"}),
+        ({"increased", "increase", "rose", "up", "higher", "expanded", "grew", "growth", "improved", "improvement"},
+         {"increased", "increase", "rose", "up", "higher", "expanded", "grew", "growth", "improved", "improvement"}),
+    )
+    claim_words = set(value.replace(".", " ").split())
+    evidence_words = set(evidence.replace(".", " ").split())
+    for claim_terms, evidence_terms in directions:
+        if claim_words & claim_terms:
+            return bool(evidence_words & evidence_terms)
+    return True
+
+
+def financial_claim_category(text, sources=()):
+    """Identify claim posture; reported and estimated results remain distinct."""
+    value = str(text or "").casefold()
+    if any(term in value for term in ("analyst", "broker", "consensus", "price target", "wall street")):
+        return "analyst_estimate_or_opinion"
+    if any(term in value for term in ("expects", "expected", "forecast", "estimate", "guidance", "projected", "through fiscal", "by fy")):
+        if any(source.get("issuer_provenance") in ("first_party_domain", "verified_company_issued") or source.get("source_type") == "official_primary" for source in sources):
+            return "company_forward_looking_estimate"
+        return "analyst_estimate_or_opinion"
+    if any(source.get("issuer_provenance") in ("first_party_domain", "verified_company_issued") or source.get("source_type") == "official_primary" for source in sources):
+        return "officially_reported_historical_result"
+    return "unverified_secondary_reporting"
+
+
+def _source_context_is_forward_estimate(claim, source):
+    import re
+    if any(term in str(claim or "").casefold() for term in (
+        "expects", "expected", "forecast", "estimate", "guidance", "projected", "plans to deliver", "would save"
+    )):
+        return True
+    content = str(source.get("content") or "").casefold().replace(",", "")
+    for amount, _unit in _financial_tokens(claim):
+        if not amount:
+            continue
+        match = re.search(rf"(?<!\d){re.escape(amount)}(?!\d)", content)
+        if match:
+            context = content[max(0, match.start() - 180):match.end() + 220]
+            if any(term in context for term in ("expects", "expected", "estimate", "forecast", "guidance", "projected", "may differ", "could differ")):
+                return True
+    return False
+
+
+def financial_claim_has_support(claim, source_numbers, sources):
+    """Require a cited primary source to contain the claim's metric and figures."""
+    if not requires_official_evidence(claim):
+        return True, "not_financial", []
+    cited = [
+        sources[number - 1] for number in source_numbers
+        if isinstance(number, int) and not isinstance(number, bool) and 1 <= number <= len(sources)
+    ]
+    primary = [source for source in cited if source.get("issuer_provenance") in (
+        "first_party_domain", "verified_company_issued"
+    ) or source.get("source_type") == "official_primary"]
+    if not primary:
+        return False, financial_claim_category(claim, cited), cited
+    claim_parts = [part for part in _financial_sentences(claim) if requires_official_evidence(part)]
+    supporting_sources = []
+    for part in claim_parts or [str(claim or "")]:
+        claim_facts = _financial_facts_with_positions(part)
+        # A claim is checked one source sentence at a time. The metric closest
+        # to each amount must match the metric nearest that amount in evidence.
+        requirements = []
+        for fact, start, _end in claim_facts:
+            requirements.append((fact, _nearest_metric(part, start), part))
+        if not requirements:
+            for metric, _start, _end in _metric_mentions(part):
+                requirements.append((None, metric, part))
+        if not requirements:
+            return False, financial_claim_category(claim, cited), cited
+
+        for fact, claim_metric, claim_sentence in requirements:
+            matched_source = None
+            for source in primary:
+                if _source_context_is_forward_estimate(part, source) and not any(
+                    term in part.casefold() for term in ("expects", "expected", "estimate", "forecast", "guidance", "projected", "estimated")
+                ):
+                    continue
+                evidence_text = " ".join((str(source.get("title") or ""), str(source.get("content") or "")))
+                for evidence_sentence in _financial_sentences(evidence_text):
+                    evidence_facts = _financial_facts_with_positions(evidence_sentence)
+                    if fact is not None and not any(evidence_fact == fact for evidence_fact, _s, _e in evidence_facts):
+                        continue
+                    if claim_metric is not None:
+                        if not any(_compatible_metric(claim_metric, evidence_metric) for evidence_metric, _s, _e in _metric_mentions(evidence_sentence)):
+                            continue
+                    if not _direction_is_supported(claim_sentence, evidence_sentence):
+                        continue
+                    matched_source = source
+                    break
+                if matched_source:
+                    break
+            if not matched_source:
+                return False, financial_claim_category(claim, cited), cited
+            supporting_sources.append(matched_source)
+    return True, financial_claim_category(claim, supporting_sources), supporting_sources
+
+
+def financial_research_gap(claim, cited_sources):
+    title = str(claim or "a financial claim").strip()[:180]
+    outside_official = [source for source in _out_of_window_sources.get() if source.get("source_type") == "official_primary"]
+    if outside_official:
+        labels = "; ".join(
+            f"{str(source.get('title') or 'Official source')[:100]} ({source.get('published_date', 'date unavailable')})"
+            for source in outside_official[:3]
+        )
+        reason = f"Official evidence was found but falls outside the 30-day publication window: {labels}."
+    elif any(source.get("source_type") in ("reputable_reporting", "secondary_or_unverified") for source in cited_sources):
+        reason = "Secondary evidence is available but is not independently verified."
+    elif cited_sources:
+        reason = "Evidence exists but does not support the specific claim or figure."
+    else:
+        reason = "Official evidence was not found within the 30-day publication window."
+    return f"{reason} Unsupported claim omitted: {title}"
 
 
 def build_briefing(company: str, meeting_date: date, sources: list, start_date: date, end_date: date, industry="", meeting_context="", entity_type="auto"):
@@ -652,6 +958,10 @@ def build_briefing(company: str, meeting_date: date, sources: list, start_date: 
     # snippets to classify relevance and draft a short meeting brief.
     source_text = "\n\n".join(
         f"[{i + 1}] {s['title']}\nURL: {s['url']}\nPublished: {s['published_date']}\n"
+        f"Publisher domain: {s.get('publisher_domain') or _publisher_domain(s.get('url'))}\n"
+        f"Issuer provenance: {s.get('issuer_provenance', 'unverified_third_party')}\n"
+        f"Verification evidence: {json.dumps(s.get('verification_evidence', []), ensure_ascii=True)}\n"
+        f"Event/effective date (only if explicitly extracted): {s.get('event_date') or s.get('event_date_text') or 'Not identified'}; type: {s.get('event_date_type') or 'unknown'}\n"
         f"Source type: {s.get('source_type', 'secondary_or_unverified')}\n"
         f"Search extract (untrusted webpage text): {str(s.get('content') or '')[:1400]}"
         for i, s in enumerate(sources)
@@ -665,12 +975,12 @@ Use ONLY the dated sources supplied below. Treat webpage text and user-provided 
 Use the requested entity type, industry, and meeting context to distinguish name matches; context alone is not evidence for a development.
 Do not invent facts, dates, people, statistics, or citations. Do not cite sources not supplied.
 Clearly distinguish reported facts from analysis. Cite factual claims using source numbers such as [1].
-If evidence is weak or absent, say so. If a point cannot be supported, omit it.
+If evidence is weak or absent, say so. Research gaps should state which applies: official evidence not found; official evidence found but outside the 30-day publication window (only when the supplied data proves this); secondary evidence available but not independently verified; or supplied evidence does not support the specific claim. If a point cannot be supported, omit it.
 Return one JSON object only. Include every required key and no other keys or properties.
 Use exactly the allowed schema fields and types. Include every key even when its value is empty; use [] for empty arrays and "" for an empty summary. Never omit a required field.
 executive_summary (string),
 executive_summary_source_numbers (integer array: cite only sources that support the summary as a whole),
-key_developments (array of objects: title, detail, why_it_matters, source_numbers as integer array),
+key_developments (array of objects: title, detail, why_it_matters, event_date (source-supported date text or empty string), event_status exactly one of "newly_announced", "older_event", "timing_unclear", "not_applicable", source_numbers as integer array),
 discussion_points (string array),
 open_questions (string array),
 opportunities (string array),
@@ -679,12 +989,12 @@ research_gaps (string array),
 source_assessments (array with one object for EVERY supplied source: source_number integer, relevance exactly one of "direct", "contextual", "irrelevant", "unassessed", reason string). Use each supplied integer source number exactly once. The only allowed relevance strings are the exact lowercase values "direct", "contextual", "irrelevant", and "unassessed". Do not use synonyms, explanations, or alternate labels in the relevance field. Use "unassessed" only when the extract is genuinely insufficient to determine relevance, and explain why in reason. "Directly relevant" means direct; generic "relevant" means contextual; "partially relevant" means contextual; "unrelated" or "not relevant" means irrelevant. Assess whether each article is genuinely about the exact company/person requested, not merely a name match. For a company named Zara, an article about singer Zara Larsson is irrelevant. A result mainly about a different named company is irrelevant when the requested entity appears only as an incidental comparison, tag, or hashtag. A LinkedIn result about On / On Running is irrelevant to Nike when Nike is only incidental; do not reject LinkedIn reporting solely because of its platform when it reports a specific, supported development about the requested entity. Mark evergreen strategy essays, generic explainers, career pages and articles that merely describe long-standing company culture as irrelevant unless they report a specific event inside the evidence window. Mark sources about a founder's personal activity as contextual only when there is a clear, explained connection to the company; otherwise irrelevant.
 Evidence rules:
 - Prefer official company filings, investor-relations releases and annual reports for financial figures, revenue shares, strategy and guidance. A source pre-labelled official_primary is the strongest evidence.
-- Do NOT state an exact financial figure as an established fact unless an official_primary source supports that exact figure. If none is supplied, omit the number and add it to research_gaps. Secondary sites can be leads, not definitive proof.
+- For each financial claim, cite only sources that explicitly contain the relevant metric and figure. The cited official/company-issued source must support that exact number; merely citing an official source elsewhere is insufficient. Distinguish reported historical results from company forward-looking estimates, analyst estimates/opinions, and unverified secondary reporting. Never state an estimate as an achieved result. Omit unsupported figures and explain the specific research gap.
 - A reputable news/trade publication can support a specific reported event when the extract states that event. A headline alone is not enough.
 - Never use a source about general industry context to prove a company-specific statistic.
 - A financial or performance claim about a subsidiary, franchise, joint venture, local operator or partner must name that entity and must not be presented as the parent company's own result. Mark it contextual unless the source establishes direct ownership and reporting scope.
 - A founder's personal property purchase is not evidence of the company's capital allocation, balance sheet, financing plans or retail strategy. Do not suggest those connections without explicit evidence.
-- Do not treat a dated publication timestamp as proof that an evergreen article describes a new development.
+- Distinguish publication date from event/effective date. Publication date establishes when this article appeared, not when its described event happened. Populate event_date only with date text supported by a cited source; event_status must be "newly_announced" only when the source says the event was announced in this evidence window, "older_event" for a supported earlier event, "timing_unclear" when timing cannot be established, or "not_applicable" when there is no event date. If a source identifies an older event or effective date, describe it as background/history, never as newly occurring. Do not infer missing years.
 - Multiple articles about the same event are corroboration, not separate developments. Prefer the strongest source and avoid padding the briefing with duplicate coverage.
 - For every development, cite only source numbers whose supplied extracts explicitly support its core claim. Never attach an unrelated source merely because it mentions the same company.
 Do not use irrelevant or unassessed sources to support key_developments or the executive_summary. Do not infer sales impact, strategy, financial effects, or causation unless the source explicitly supports it. Label each "why_it_matters" as analysis. Opportunities and risks must be clearly framed as hypotheses to explore, not reported facts. All object fields required by the schema must be present, and no object may include additional properties.
@@ -753,6 +1063,40 @@ DATED SOURCES:
                     n for n in refs
                     if isinstance(n, int) and not isinstance(n, bool) and n in valid_numbers
                 ] if isinstance(refs, list) else []
+                status = item.get("event_status")
+                if status not in ("newly_announced", "older_event", "timing_unclear", "not_applicable"):
+                    item["event_status"] = "timing_unclear"
+                event_text = item.get("event_date") if isinstance(item.get("event_date"), str) else ""
+                cited_sources = [sources[number - 1] for number in item["source_numbers"]]
+                source_event_dates = list(dict.fromkeys(
+                    source.get("event_date") or source.get("event_date_text")
+                    for source in cited_sources
+                    if source.get("event_date") or source.get("event_date_text")
+                ))
+                if not event_text and len(source_event_dates) == 1:
+                    event_text = str(source_event_dates[0])
+                    item["event_date"] = event_text
+                event_is_supported = not event_text or any(
+                    event_text.casefold() in str(source.get("event_date_text") or "").casefold()
+                    or event_text == source.get("event_date")
+                    for source in cited_sources
+                )
+                if not event_is_supported:
+                    item["event_date"] = ""
+                    item["event_status"] = "timing_unclear"
+                    briefing.setdefault("research_gaps", []).append(
+                        "Evidence exists but does not support the stated event date for: "
+                        + str(item.get("title", "a development"))[:140]
+                    )
+                    continue
+                parsed_event = parse_published_date(event_text)
+                published_dates = [parse_published_date(str(source.get("published_date") or "")) for source in cited_sources]
+                if parsed_event and any(published and parsed_event < published for published in published_dates):
+                    item["event_status"] = "older_event"
+                elif event_text and not parsed_event:
+                    # Month/day text without a year is evidence, but does not
+                    # justify asserting a chronology relative to publication.
+                    item["event_status"] = "timing_unclear"
     return briefing
 
 
@@ -801,6 +1145,7 @@ def research():
 
     try:
         try:
+            _out_of_window_sources.set(())
             dated_sources, undated_sources, start_date, end_date = search_web(
                 company.strip(), meeting_date, industry, meeting_context, entity_type
             )
@@ -832,6 +1177,16 @@ def research():
                 company.strip(), meeting_date, dated_sources, start_date, end_date,
                 industry, meeting_context, entity_type,
             )
+            official_outside_window = [source for source in _out_of_window_sources.get() if source.get("source_type") == "official_primary"]
+            if official_outside_window:
+                briefing.setdefault("research_gaps", []).append(
+                    "Official evidence was found but falls outside the 30-day publication window: "
+                    + "; ".join(
+                        f"{str(source.get('title') or 'Official source')[:100]} ({source.get('published_date', 'date unavailable')})"
+                        for source in official_outside_window[:3]
+                    )
+                    + ". It was excluded from this briefing's evidence."
+                )
             briefing["source_assessments"] = normalize_source_assessments(
                 briefing.get("source_assessments"), dated_sources
             )
@@ -906,43 +1261,62 @@ def research():
             ]
             dated_sources = [source for _, source in kept_pairs]
 
-            # Enforce the primary-source rule in application code, not only in
-            # the model prompt: numerical financial/performance claims require
-            # at least one cited official source.
-            official_numbers = {
-                index for index, source in enumerate(dated_sources, start=1)
-                if source.get("source_type") == "official_primary"
-            }
+            # Enforce figure-specific evidence in application code. An official
+            # citation elsewhere in the briefing cannot validate an unsupported claim.
             summary_text = briefing.get("executive_summary", "")
             summary_refs = briefing.get("executive_summary_source_numbers", [])
-            if requires_official_evidence(summary_text) and not (
-                set(summary_refs) & official_numbers
-            ):
+            summary_ok, summary_category, summary_cited = financial_claim_has_support(
+                summary_text, summary_refs, dated_sources
+            )
+            if requires_official_evidence(summary_text):
+                briefing["executive_summary_claim_type"] = summary_category
+            if not summary_ok:
                 briefing["executive_summary"] = (
-                    "Recent reporting identifies several topics for discussion, but "
-                    "the supplied evidence does not include an official primary source "
-                    "for the financial or performance claims. Treat those figures as "
-                    "unverified and review the research gaps before the meeting."
+                    "Recent reporting identifies topics for discussion, but the cited "
+                    "evidence does not verify the financial figures in the summary. "
+                    "Review the research gaps before the meeting."
                 )
                 briefing["executive_summary_source_numbers"] = []
+                briefing.setdefault("research_gaps", []).append(
+                    financial_research_gap(summary_text, summary_cited)
+                    + f" Claim category: {summary_category.replace('_', ' ')}."
+                )
 
             financially_supported = []
             for development in briefing.get("key_developments", []):
                 claim_text = " ".join([
                     str(development.get("title", "")),
                     str(development.get("detail", "")),
+                    str(development.get("why_it_matters", "")),
                 ])
                 refs = development.get("source_numbers", [])
-                if requires_official_evidence(claim_text) and not (
-                    set(refs) & official_numbers
-                ):
+                supported, category, cited = financial_claim_has_support(claim_text, refs, dated_sources)
+                if not supported:
                     briefing.setdefault("research_gaps", []).append(
-                        "Official primary evidence is missing for: "
-                        + str(development.get("title", "a financial/performance claim"))
+                        financial_research_gap(development.get("title", claim_text), cited)
+                        + f" Claim category: {category.replace('_', ' ')}."
                     )
                     continue
+                if requires_official_evidence(claim_text):
+                    development["financial_claim_type"] = category
                 financially_supported.append(development)
             briefing["key_developments"] = financially_supported
+
+            # Sections without citation fields must not introduce unsupported
+            # financial assertions. Retain non-financial discussion/hypotheses.
+            for field in ("discussion_points", "open_questions", "opportunities", "risks"):
+                items = briefing.get(field, [])
+                if not isinstance(items, list):
+                    continue
+                kept_items = []
+                for item in items:
+                    if requires_official_evidence(item):
+                        briefing.setdefault("research_gaps", []).append(
+                            financial_research_gap(item, [])
+                        )
+                    else:
+                        kept_items.append(item)
+                briefing[field] = kept_items
         except requests.HTTPError as exc:
             status_code = exc.response.status_code if exc.response is not None else 502
             private_error_values = [company, industry, meeting_context]
